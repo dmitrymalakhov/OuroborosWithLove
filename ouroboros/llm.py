@@ -544,13 +544,15 @@ class LLMClient:
                 kwargs["tool_choice"] = tool_choice
 
         if self._provider == "gigachat":
-            kwargs["repetition_penalty"] = float(os.environ.get("GIGACHAT_REPETITION_PENALTY", "1.1"))
-            kwargs["profanity_check"] = str(os.environ.get("GIGACHAT_PROFANITY_CHECK", "false")).strip().lower() in {"1", "true", "yes", "on"}
+            kwargs["extra_body"] = {
+                "repetition_penalty": float(os.environ.get("GIGACHAT_REPETITION_PENALTY", "1.1")),
+                "profanity_check": str(os.environ.get("GIGACHAT_PROFANITY_CHECK", "false")).strip().lower() in {"1", "true", "yes", "on"},
+            }
 
         use_stream = self._provider == "gigachat" and callable(stream_handler)
         if use_stream:
             kwargs["stream"] = True
-            kwargs["update_interval"] = int(os.environ.get("GIGACHAT_STREAM_UPDATE_INTERVAL", "1"))
+            kwargs.setdefault("extra_body", {})["update_interval"] = int(os.environ.get("GIGACHAT_STREAM_UPDATE_INTERVAL", "1"))
 
         try:
             resp = client.chat.completions.create(**kwargs)

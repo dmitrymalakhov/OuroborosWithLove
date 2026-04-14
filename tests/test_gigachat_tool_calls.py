@@ -46,3 +46,16 @@ def test_execute_single_tool_accepts_dict_arguments(tmp_path):
     )
     assert result["result"] == "ok"
     assert result["is_error"] is False
+
+
+def test_normalize_gigachat_tool_call_from_content_json():
+    msg = {
+        "role": "assistant",
+        "content": '{"name":"browse_page","arguments":{"url":"https://example.com","output":"text"}}',
+    }
+    out = LLMClient._normalize_response_message("gigachat", msg)
+    assert out.get("tool_calls"), "JSON content payload must be mapped into tool_calls"
+    tc = out["tool_calls"][0]
+    assert tc["function"]["name"] == "browse_page"
+    assert '"url": "https://example.com"' in tc["function"]["arguments"]
+    assert out["content"] == ""

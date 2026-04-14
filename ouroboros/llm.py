@@ -346,6 +346,37 @@ class LLMClient:
                     },
                 }]
 
+        # Some adapters can put function-call payload as JSON in content.
+        # Accept shapes like:
+        # {"name":"tool","arguments":{...}} or {"function_call":{"name":"tool","arguments":...}}
+        if not normalized.get("tool_calls"):
+            import json as _json
+            raw_content = normalized.get("content")
+            if isinstance(raw_content, str):
+                maybe_json = raw_content.strip()
+                if maybe_json.startswith("{") and maybe_json.endswith("}"):
+                    try:
+                        payload = _json.loads(maybe_json)
+                    except Exception:
+                        payload = None
+                    if isinstance(payload, dict):
+                        fc = payload.get("function_call") if isinstance(payload.get("function_call"), dict) else payload
+                        if isinstance(fc, dict) and fc.get("name"):
+                            arguments = fc.get("arguments", "{}")
+                            if isinstance(arguments, dict):
+                                arguments = _json.dumps(arguments, ensure_ascii=False)
+                            elif not isinstance(arguments, str):
+                                arguments = "{}"
+                            normalized["tool_calls"] = [{
+                                "id": str(fc.get("id") or f"call_{uuid.uuid4().hex[:12]}"),
+                                "type": "function",
+                                "function": {
+                                    "name": str(fc.get("name")),
+                                    "arguments": str(arguments or "{}"),
+                                },
+                            }]
+                            normalized["content"] = ""
+
         # Some SDK adapters may return dict arguments even inside tool_calls.
         tc_list = normalized.get("tool_calls")
         if isinstance(tc_list, list):

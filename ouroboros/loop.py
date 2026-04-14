@@ -436,7 +436,7 @@ def _check_budget_limits(
         try:
             final_msg, final_cost = _call_llm_with_retry(
                 llm, messages, active_model, None, active_effort,
-                max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
+                max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, emit_progress, task_type
             )
             if final_msg:
                 return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
@@ -659,7 +659,7 @@ def run_llm_loop(
                 try:
                     final_msg, final_cost = _call_llm_with_retry(
                         llm, messages, active_model, None, active_effort,
-                        max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
+                        max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, emit_progress, task_type
                     )
                     if final_msg:
                         return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
@@ -699,7 +699,7 @@ def run_llm_loop(
             # --- LLM call with retry ---
             msg, cost = _call_llm_with_retry(
                 llm, messages, active_model, tool_schemas, active_effort,
-                max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
+                max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, emit_progress, task_type
             )
 
             # Fallback to another model if primary model returns empty responses
@@ -728,7 +728,7 @@ def run_llm_loop(
                 # Try fallback model (don't increment round_idx — this is still same logical round)
                 msg, fallback_cost = _call_llm_with_retry(
                     llm, messages, fallback_model, tool_schemas, active_effort,
-                    max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
+                    max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, emit_progress, task_type
                 )
 
                 # If fallback also fails, give up
@@ -837,6 +837,7 @@ def _call_llm_with_retry(
     round_idx: int,
     event_queue: Optional[queue.Queue],
     accumulated_usage: Dict[str, Any],
+    emit_progress: Callable[[str], None],
     task_type: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], float]:
     """
@@ -854,6 +855,14 @@ def _call_llm_with_retry(
             kwargs = {"messages": messages, "model": model, "reasoning_effort": effort}
             if tools:
                 kwargs["tools"] = tools
+
+            def _on_stream_chunk(chunk: str) -> None:
+                if not chunk:
+                    return
+                # GigaChat stream updates are already throttled server-side via update_interval.
+                emit_progress(chunk)
+
+            kwargs["stream_handler"] = _on_stream_chunk
             resp_msg, usage = llm.chat(**kwargs)
             msg = resp_msg
             add_usage(accumulated_usage, usage)

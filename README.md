@@ -78,12 +78,16 @@ Telegram --> colab_launcher.py
 
 | Key | Required | Where to get it |
 |-----|----------|-----------------|
-| `OPENROUTER_API_KEY` | Yes | [openrouter.ai/keys](https://openrouter.ai/keys) -- Create an account, add credits, generate a key |
+| `OPENROUTER_API_KEY` | Yes* | [openrouter.ai/keys](https://openrouter.ai/keys) -- Create an account, add credits, generate a key |
+| `GIGACHAT_AUTHORIZATION_KEY` | Yes* | Studio GigaChat API project -- used to fetch access tokens (`/api/v2/oauth`) |
+| `GIGACHAT_ACCESS_TOKEN` | Optional | Ready-to-use access token (valid ~30 minutes), can be used instead of `GIGACHAT_AUTHORIZATION_KEY` |
 | `TELEGRAM_BOT_TOKEN` | Yes | [@BotFather](https://t.me/BotFather) on Telegram (see Step 1) |
 | `TOTAL_BUDGET` | Yes | Your spending limit in USD (e.g. `50`) |
 | `GITHUB_TOKEN` | Yes | [github.com/settings/tokens](https://github.com/settings/tokens) -- Generate a classic token with `repo` scope |
 | `OPENAI_API_KEY` | No | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) -- Enables web search tool |
 | `ANTHROPIC_API_KEY` | No | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) -- Enables Claude Code CLI |
+
+\* Set `OPENROUTER_API_KEY` when `OUROBOROS_LLM_PROVIDER=openrouter` (default), or set GigaChat credentials when `OUROBOROS_LLM_PROVIDER=gigachat`.
 
 ### Step 3: Set Up Google Colab
 
@@ -104,6 +108,7 @@ CFG = {
     "GITHUB_USER": "YOUR_GITHUB_USERNAME",                       # <-- CHANGE THIS
     "GITHUB_REPO": "ouroboros",                                  # <-- repo name (after fork)
     # Models
+    "OUROBOROS_LLM_PROVIDER": "openrouter",                      # openrouter | gigachat
     "OUROBOROS_MODEL": "anthropic/claude-sonnet-4.6",            # primary LLM (via OpenRouter)
     "OUROBOROS_MODEL_CODE": "anthropic/claude-sonnet-4.6",       # code editing (Claude Code CLI)
     "OUROBOROS_MODEL_LIGHT": "google/gemini-3-pro-preview",      # consciousness + lightweight tasks
@@ -179,7 +184,9 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Variable | Description |
 |----------|-------------|
-| `OPENROUTER_API_KEY` | OpenRouter API key for LLM calls |
+| `OPENROUTER_API_KEY` | OpenRouter API key for LLM calls (required for `OUROBOROS_LLM_PROVIDER=openrouter`) |
+| `GIGACHAT_AUTHORIZATION_KEY` | GigaChat Authorization Key used to fetch access token (required for `OUROBOROS_LLM_PROVIDER=gigachat`, unless token provided directly) |
+| `GIGACHAT_ACCESS_TOKEN` | Pre-issued GigaChat access token (alternative to Authorization Key) |
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot API token |
 | `TOTAL_BUDGET` | Spending limit in USD |
 | `GITHUB_TOKEN` | GitHub personal access token with `repo` scope |
@@ -195,6 +202,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `OUROBOROS_LLM_PROVIDER` | `openrouter` | LLM backend provider (`openrouter` or `gigachat`) |
 | `GITHUB_USER` | *(required in config cell)* | GitHub username |
 | `GITHUB_REPO` | `ouroboros` | GitHub repository name |
 | `OUROBOROS_MODEL` | `anthropic/claude-sonnet-4.6` | Primary LLM model (via OpenRouter) |

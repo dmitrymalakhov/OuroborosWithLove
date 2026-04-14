@@ -1,7 +1,7 @@
 """
 Ouroboros — LLM client.
 
-The only module that communicates with the LLM API (OpenRouter).
+The only module that communicates with the LLM API (OpenRouter/GigaChat).
 Contract: chat(), default_model(), available_models(), add_usage().
 """
 
@@ -10,6 +10,10 @@ from __future__ import annotations
 import logging
 import os
 import time
+import uuid
+import base64
+import mimetypes
+from urllib.parse import urlparse
 from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
@@ -103,18 +107,124 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, float, float]]:
 
 
 class LLMClient:
-    """OpenRouter API wrapper. All LLM calls go through this class."""
+    """LLM API wrapper (OpenRouter or GigaChat). All LLM calls go through this class."""
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         base_url: str = "https://openrouter.ai/api/v1",
     ):
-        self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
-        self._base_url = base_url
+        self._provider = str(os.environ.get("OUROBOROS_LLM_PROVIDER", "openrouter")).strip().lower()
+        if self._provider not in {"openrouter", "gigachat"}:
+            log.warning("Unknown OUROBOROS_LLM_PROVIDER=%r, using openrouter", self._provider)
+            self._provider = "openrouter"
+
+        if self._provider == "gigachat":
+            self._base_url = os.environ.get("GIGACHAT_BASE_URL", "https://gigachat.devices.sberbank.ru/api/v1").strip()
+            self._oauth_url = os.environ.get("GIGACHAT_OAUTH_URL", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth").strip()
+            self._oauth_scope = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS").strip()
+            self._authorization_key = os.environ.get("GIGACHAT_AUTHORIZATION_KEY", "").strip()
+            # Optional pre-issued token (for manual control or external rotation).
+            self._api_key = api_key or os.environ.get("GIGACHAT_ACCESS_TOKEN", "").strip()
+        else:
+            self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
+            self._base_url = base_url
+
+        self._client = None
+        self._token_expires_at = 0
+
+    def _ensure_gigachat_token(self, force_refresh: bool = False) -> None:
+        """Ensure GigaChat access token is present and reasonably fresh."""
+        if self._provider != "gigachat":
+            return
+
+        now = int(time.time())
+        if not force_refresh and self._api_key and self._token_expires_at and now < (self._token_expires_at - 30):
+            return
+
+        if self._api_key and not self._token_expires_at and not force_refresh:
+            # Token was provided manually; assume it is still valid until API says otherwise.
+            return
+
+        if not self._authorization_key:
+            raise RuntimeError(
+                "GigaChat token missing. Set GIGACHAT_ACCESS_TOKEN or GIGACHAT_AUTHORIZATION_KEY."
+            )
+
+        import requests
+
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+            "RqUID": str(uuid.uuid4()),
+            "Authorization": f"Basic {self._authorization_key}",
+        }
+        payload = {"scope": self._oauth_scope}
+        resp = requests.post(self._oauth_url, data=payload, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        token = str(data.get("access_token") or "").strip()
+        expires_at_raw = int(data.get("expires_at") or 0)
+        # Some APIs return milliseconds since epoch. Normalize to seconds.
+        expires_at = int(expires_at_raw / 1000) if expires_at_raw > 10_000_000_000 else expires_at_raw
+        if not token:
+            raise RuntimeError("GigaChat OAuth response does not contain access_token")
+        self._api_key = token
+        self._token_expires_at = expires_at
         self._client = None
 
+    def _gigachat_upload_image(self, image: Dict[str, Any], idx: int = 0) -> str:
+        """Upload one image to GigaChat files API and return file id."""
+        self._ensure_gigachat_token()
+        import requests
+
+        content: bytes
+        mime = str(image.get("mime") or "image/png")
+        filename = f"vision_{idx}.png"
+
+        if "base64" in image:
+            raw_b64 = str(image["base64"] or "").strip()
+            # Accept either plain base64 or data URLs.
+            if raw_b64.startswith("data:") and "," in raw_b64:
+                raw_b64 = raw_b64.split(",", 1)[1]
+            content = base64.b64decode(raw_b64)
+            ext = mimetypes.guess_extension(mime) or ".png"
+            filename = f"vision_{idx}{ext}"
+        elif "url" in image:
+            url = str(image["url"]).strip()
+            parsed = urlparse(url)
+            guessed = os.path.basename(parsed.path) or ""
+            if guessed:
+                filename = guessed
+            guessed_mime = mimetypes.guess_type(filename)[0]
+            if guessed_mime:
+                mime = guessed_mime
+            resp = requests.get(url, timeout=20)
+            resp.raise_for_status()
+            content = resp.content
+        else:
+            raise ValueError("image must contain either 'url' or 'base64'")
+
+        upload_url = f"{self._base_url.rstrip('/')}/files"
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+        files = {"file": (filename, content, mime)}
+        data = {"purpose": "general"}
+        resp = requests.post(upload_url, headers=headers, files=files, data=data, timeout=30)
+        if resp.status_code == 401:
+            # Token might be stale (especially if user provided pre-issued token).
+            self._ensure_gigachat_token(force_refresh=True)
+            headers = {"Authorization": f"Bearer {self._api_key}"}
+            resp = requests.post(upload_url, headers=headers, files=files, data=data, timeout=30)
+        resp.raise_for_status()
+        payload = resp.json() or {}
+        file_id = str(payload.get("id") or "").strip()
+        if not file_id:
+            raise RuntimeError("GigaChat upload response missing file id")
+        return file_id
+
     def _get_client(self):
+        if self._provider == "gigachat":
+            self._ensure_gigachat_token()
         if self._client is None:
             from openai import OpenAI
             self._client = OpenAI(
@@ -129,6 +239,8 @@ class LLMClient:
 
     def _fetch_generation_cost(self, generation_id: str) -> Optional[float]:
         """Fetch cost from OpenRouter Generation API as fallback."""
+        if self._provider != "openrouter":
+            return None
         try:
             import requests
             url = f"{self._base_url.rstrip('/')}/generation?id={generation_id}"
@@ -169,7 +281,7 @@ class LLMClient:
         }
 
         # Pin Anthropic models to Anthropic provider for prompt caching
-        if model.startswith("anthropic/"):
+        if self._provider == "openrouter" and model.startswith("anthropic/"):
             extra_body["provider"] = {
                 "order": ["Anthropic"],
                 "allow_fallbacks": False,
@@ -179,21 +291,35 @@ class LLMClient:
         kwargs: Dict[str, Any] = {
             "model": model,
             "messages": messages,
-            "max_tokens": max_tokens,
-            "extra_body": extra_body,
+            "max_tokens": max_tokens
         }
+        if self._provider == "openrouter":
+            kwargs["extra_body"] = extra_body
         if tools:
             # Add cache_control to last tool for Anthropic prompt caching
             # This caches all tool schemas (they never change between calls)
             tools_with_cache = [t for t in tools]  # shallow copy
-            if tools_with_cache:
+            if tools_with_cache and self._provider == "openrouter":
                 last_tool = {**tools_with_cache[-1]}  # copy last tool
                 last_tool["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
                 tools_with_cache[-1] = last_tool
             kwargs["tools"] = tools_with_cache
             kwargs["tool_choice"] = tool_choice
 
-        resp = client.chat.completions.create(**kwargs)
+        try:
+            resp = client.chat.completions.create(**kwargs)
+        except Exception as e:
+            # GigaChat access token expires every 30m — refresh once on auth errors.
+            if self._provider == "gigachat":
+                err_text = str(e).lower()
+                if "401" in err_text or "unauthorized" in err_text:
+                    self._ensure_gigachat_token(force_refresh=True)
+                    client = self._get_client()
+                    resp = client.chat.completions.create(**kwargs)
+                else:
+                    raise
+            else:
+                raise
         resp_dict = resp.model_dump()
         usage = resp_dict.get("usage") or {}
         choices = resp_dict.get("choices") or [{}]
@@ -218,7 +344,7 @@ class LLMClient:
                     usage["cache_write_tokens"] = int(cache_write)
 
         # Ensure cost is present in usage (OpenRouter includes it, but fallback if missing)
-        if not usage.get("cost"):
+        if self._provider == "openrouter" and not usage.get("cost"):
             gen_id = resp_dict.get("id") or ""
             if gen_id:
                 cost = self._fetch_generation_cost(gen_id)
@@ -250,24 +376,42 @@ class LLMClient:
         Returns:
             (text_response, usage_dict)
         """
-        # Build multipart content
-        content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
-        for img in images:
-            if "url" in img:
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": img["url"]},
+        if self._provider == "gigachat":
+            # GigaChat works with file attachments. One image per message.
+            messages: List[Dict[str, Any]] = []
+            for i, img in enumerate(images):
+                try:
+                    file_id = self._gigachat_upload_image(img, idx=i)
+                except Exception:
+                    log.warning("vision_query: failed to upload image #%d to GigaChat", i + 1, exc_info=True)
+                    continue
+                text = prompt if i == 0 else f"Дополнительное изображение {i + 1}. Учитывай его в анализе."
+                messages.append({
+                    "role": "user",
+                    "content": text,
+                    "attachments": [file_id],
                 })
-            elif "base64" in img:
-                mime = img.get("mime", "image/png")
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime};base64,{img['base64']}"},
-                })
-            else:
-                log.warning("vision_query: skipping image with unknown format: %s", list(img.keys()))
+            if not messages:
+                raise RuntimeError("No images were uploaded to GigaChat for vision query")
+        else:
+            # OpenRouter/OpenAI-compatible multimodal payload
+            content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+            for img in images:
+                if "url" in img:
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {"url": img["url"]},
+                    })
+                elif "base64" in img:
+                    mime = img.get("mime", "image/png")
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{img['base64']}"},
+                    })
+                else:
+                    log.warning("vision_query: skipping image with unknown format: %s", list(img.keys()))
+            messages = [{"role": "user", "content": content}]
 
-        messages = [{"role": "user", "content": content}]
         response_msg, usage = self.chat(
             messages=messages,
             model=model,

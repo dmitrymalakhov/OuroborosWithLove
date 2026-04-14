@@ -13,12 +13,16 @@ import time
 import uuid
 import base64
 import mimetypes
+import re
 from urllib.parse import urlparse
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
 DEFAULT_LIGHT_MODEL = "google/gemini-3-pro-preview"
+GIGACHAT_DEFAULT_MODEL = "GigaChat-2-Max"
+GIGACHAT_DEFAULT_CODE_MODEL = "GigaChat-2-Pro"
+GIGACHAT_DEFAULT_LIGHT_MODEL = "GigaChat-2-Lite"
 
 
 def normalize_reasoning_effort(value: str, default: str = "medium") -> str:
@@ -301,17 +305,66 @@ class LLMClient:
                 msg["role"] = "function"
                 if not msg.get("name"):
                     msg["name"] = str(msg.get("tool_call_id") or "tool")
+                # GigaChat legacy function role does not accept tool_call_id.
+                msg.pop("tool_call_id", None)
             # Bridge assistant.tool_calls to legacy assistant.function_call shape.
-            if msg.get("role") == "assistant" and msg.get("tool_calls") and not msg.get("function_call"):
-                tc0 = (msg.get("tool_calls") or [{}])[0]
-                fn = tc0.get("function") if isinstance(tc0, dict) else {}
-                if isinstance(fn, dict) and fn.get("name"):
-                    msg["function_call"] = {
-                        "name": str(fn.get("name")),
-                        "arguments": fn.get("arguments", "{}"),
-                    }
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                if not msg.get("function_call"):
+                    tc0 = (msg.get("tool_calls") or [{}])[0]
+                    fn = tc0.get("function") if isinstance(tc0, dict) else {}
+                    if isinstance(fn, dict) and fn.get("name"):
+                        msg["function_call"] = {
+                            "name": str(fn.get("name")),
+                            "arguments": fn.get("arguments", "{}"),
+                        }
+                # GigaChat rejects OpenAI-native tool_calls in message history.
+                msg.pop("tool_calls", None)
             result.append(msg)
         return result
+
+    @staticmethod
+    def _pick_gigachat_function(
+        functions: List[Dict[str, Any]],
+        tool_choice: Any,
+        messages: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Pick exactly one function for GigaChat (API limit: max 1 function per request)."""
+        if not functions:
+            return None
+        if len(functions) == 1:
+            return functions[0]
+
+        if isinstance(tool_choice, dict):
+            fn = tool_choice.get("function")
+            wanted = str((fn or {}).get("name") or "").strip()
+            if wanted:
+                for f in functions:
+                    if str(f.get("name") or "") == wanted:
+                        return f
+
+        # Heuristic: rank by overlap with the latest user message.
+        last_user = ""
+        for msg in reversed(messages or []):
+            if msg.get("role") == "user":
+                last_user = str(msg.get("content") or "")
+                break
+
+        if not last_user.strip():
+            return functions[0]
+
+        query_terms = set(re.findall(r"[a-zA-Zа-яА-Я0-9_]{3,}", last_user.lower()))
+        if not query_terms:
+            return functions[0]
+
+        def _score(fn: Dict[str, Any]) -> int:
+            bag = " ".join([
+                str(fn.get("name") or ""),
+                str(fn.get("description") or ""),
+                " ".join(str((p or {}).get("description") or "") for p in (fn.get("parameters") or {}).get("properties", {}).values()),
+            ]).lower()
+            return sum(1 for t in query_terms if t in bag)
+
+        return max(functions, key=_score)
 
     @staticmethod
     def _tool_choice_to_function_call(tool_choice: Any) -> Any:
@@ -438,6 +491,7 @@ class LLMClient:
         reasoning_effort: str = "medium",
         max_tokens: int = 16384,
         tool_choice: str = "auto",
+        stream_handler: Optional[Callable[[str], None]] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Single LLM call. Returns: (response_message_dict, usage_dict with cost)."""
         if self._provider == "gigachat":
@@ -473,7 +527,7 @@ class LLMClient:
                 last_tool["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
                 tools_with_cache[-1] = last_tool
             if self._provider == "gigachat":
-                # GigaChat compatibility: prefer legacy function-calling keys.
+                # GigaChat compatibility: legacy function-calling keys + max 1 function.
                 functions = []
                 for t in tools_with_cache:
                     if not isinstance(t, dict):
@@ -481,12 +535,22 @@ class LLMClient:
                     fn = t.get("function")
                     if isinstance(fn, dict) and fn.get("name"):
                         functions.append(fn)
-                if functions:
-                    kwargs["functions"] = functions
+                picked = self._pick_gigachat_function(functions, tool_choice, messages)
+                if picked:
+                    kwargs["functions"] = [picked]
                     kwargs["function_call"] = self._tool_choice_to_function_call(tool_choice)
             else:
                 kwargs["tools"] = tools_with_cache
                 kwargs["tool_choice"] = tool_choice
+
+        if self._provider == "gigachat":
+            kwargs["repetition_penalty"] = float(os.environ.get("GIGACHAT_REPETITION_PENALTY", "1.1"))
+            kwargs["profanity_check"] = str(os.environ.get("GIGACHAT_PROFANITY_CHECK", "false")).strip().lower() in {"1", "true", "yes", "on"}
+
+        use_stream = self._provider == "gigachat" and callable(stream_handler)
+        if use_stream:
+            kwargs["stream"] = True
+            kwargs["update_interval"] = int(os.environ.get("GIGACHAT_STREAM_UPDATE_INTERVAL", "1"))
 
         try:
             resp = client.chat.completions.create(**kwargs)
@@ -502,10 +566,63 @@ class LLMClient:
                     raise
             else:
                 raise
-        resp_dict = resp.model_dump()
-        usage = resp_dict.get("usage") or {}
-        choices = resp_dict.get("choices") or [{}]
-        msg = (choices[0] if choices else {}).get("message") or {}
+        if use_stream:
+            usage: Dict[str, Any] = {}
+            msg: Dict[str, Any] = {"role": "assistant", "content": ""}
+            tool_calls_by_index: Dict[int, Dict[str, Any]] = {}
+
+            for chunk in resp:
+                c = chunk.model_dump()
+                if c.get("usage"):
+                    usage = c.get("usage") or usage
+                choices = c.get("choices") or [{}]
+                ch0 = choices[0] if choices else {}
+                delta = ch0.get("delta") or {}
+                content_piece = delta.get("content")
+                if isinstance(content_piece, str) and content_piece:
+                    msg["content"] = str(msg.get("content") or "") + content_piece
+                    stream_handler(content_piece)
+                elif isinstance(content_piece, list):
+                    parts = []
+                    for block in content_piece:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text_piece = str(block.get("text") or "")
+                            if text_piece:
+                                parts.append(text_piece)
+                    if parts:
+                        piece = "".join(parts)
+                        msg["content"] = str(msg.get("content") or "") + piece
+                        stream_handler(piece)
+
+                fc = delta.get("function_call")
+                if isinstance(fc, dict):
+                    msg_fc = msg.get("function_call") if isinstance(msg.get("function_call"), dict) else {}
+                    if fc.get("name"):
+                        msg_fc["name"] = str(fc["name"])
+                    if fc.get("arguments") is not None:
+                        msg_fc["arguments"] = str(msg_fc.get("arguments") or "") + str(fc.get("arguments") or "")
+                    if msg_fc:
+                        msg["function_call"] = msg_fc
+
+                tc_delta = delta.get("tool_calls")
+                if isinstance(tc_delta, list):
+                    for i, tc in enumerate(tc_delta):
+                        if not isinstance(tc, dict):
+                            continue
+                        tc_state = tool_calls_by_index.setdefault(i, {"id": tc.get("id") or f"call_{uuid.uuid4().hex[:12]}", "type": "function", "function": {"name": "", "arguments": ""}})
+                        fn = tc.get("function")
+                        if isinstance(fn, dict):
+                            if fn.get("name"):
+                                tc_state["function"]["name"] = str(fn["name"])
+                            if fn.get("arguments") is not None:
+                                tc_state["function"]["arguments"] = str(tc_state["function"].get("arguments") or "") + str(fn.get("arguments") or "")
+            if tool_calls_by_index:
+                msg["tool_calls"] = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index.keys())]
+        else:
+            resp_dict = resp.model_dump()
+            usage = resp_dict.get("usage") or {}
+            choices = resp_dict.get("choices") or [{}]
+            msg = (choices[0] if choices else {}).get("message") or {}
         msg = self._normalize_response_message(self._provider, msg)
 
         # Extract cached_tokens from prompt_tokens_details if available
@@ -607,13 +724,20 @@ class LLMClient:
 
     def default_model(self) -> str:
         """Return the single default model from env. LLM switches via tool if needed."""
+        if self._provider == "gigachat":
+            return os.environ.get("OUROBOROS_MODEL", GIGACHAT_DEFAULT_MODEL)
         return os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
 
     def available_models(self) -> List[str]:
         """Return list of available models from env (for switch_model tool schema)."""
-        main = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
-        code = os.environ.get("OUROBOROS_MODEL_CODE", "")
-        light = os.environ.get("OUROBOROS_MODEL_LIGHT", "")
+        if self._provider == "gigachat":
+            main = os.environ.get("OUROBOROS_MODEL", GIGACHAT_DEFAULT_MODEL)
+            code = os.environ.get("OUROBOROS_MODEL_CODE", GIGACHAT_DEFAULT_CODE_MODEL)
+            light = os.environ.get("OUROBOROS_MODEL_LIGHT", GIGACHAT_DEFAULT_LIGHT_MODEL)
+        else:
+            main = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
+            code = os.environ.get("OUROBOROS_MODEL_CODE", "")
+            light = os.environ.get("OUROBOROS_MODEL_LIGHT", "")
         models = [main]
         if code and code != main:
             models.append(code)

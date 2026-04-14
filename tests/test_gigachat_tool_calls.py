@@ -59,3 +59,42 @@ def test_normalize_gigachat_tool_call_from_content_json():
     assert tc["function"]["name"] == "browse_page"
     assert '"url": "https://example.com"' in tc["function"]["arguments"]
     assert out["content"] == ""
+
+
+def test_normalize_messages_for_gigachat_removes_openai_only_fields():
+    messages = [
+        {"role": "assistant", "tool_calls": [{"id": "call_1", "function": {"name": "browse_page", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+    ]
+    out = LLMClient._normalize_messages_for_gigachat(messages)
+    assert "tool_calls" not in out[0]
+    assert out[0]["function_call"]["name"] == "browse_page"
+    assert out[1]["role"] == "function"
+    assert "tool_call_id" not in out[1]
+
+
+def test_normalize_messages_for_gigachat_drops_tool_calls_even_with_function_call():
+    messages = [
+        {
+            "role": "assistant",
+            "function_call": {"name": "browse_page", "arguments": "{}"},
+            "tool_calls": [{"id": "call_1", "function": {"name": "browse_page", "arguments": "{}"}}],
+        },
+    ]
+    out = LLMClient._normalize_messages_for_gigachat(messages)
+    assert out[0]["function_call"]["name"] == "browse_page"
+    assert "tool_calls" not in out[0]
+
+
+def test_pick_gigachat_function_honors_tool_choice_name():
+    functions = [
+        {"name": "repo_read", "description": "Read repo file", "parameters": {"type": "object", "properties": {}}},
+        {"name": "run_shell", "description": "Run shell command", "parameters": {"type": "object", "properties": {}}},
+    ]
+    picked = LLMClient._pick_gigachat_function(
+        functions,
+        {"type": "function", "function": {"name": "run_shell"}},
+        [{"role": "user", "content": "Open terminal"}],
+    )
+    assert picked is not None
+    assert picked["name"] == "run_shell"

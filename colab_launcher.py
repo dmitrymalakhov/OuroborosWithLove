@@ -125,9 +125,18 @@ GITHUB_REPO = get_cfg("GITHUB_REPO", default=None, allow_legacy_secret=True)
 assert GITHUB_USER and str(GITHUB_USER).strip(), "GITHUB_USER not set. Add it to your config cell (see README)."
 assert GITHUB_REPO and str(GITHUB_REPO).strip(), "GITHUB_REPO not set. Add it to your config cell (see README)."
 MAX_WORKERS = int(get_cfg("OUROBOROS_MAX_WORKERS", default="5", allow_legacy_secret=True) or "5")
-MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default="anthropic/claude-sonnet-4.6", allow_legacy_secret=True)
-MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default="anthropic/claude-sonnet-4.6", allow_legacy_secret=True)
-MODEL_LIGHT = get_cfg("OUROBOROS_MODEL_LIGHT", default=DEFAULT_LIGHT_MODEL, allow_legacy_secret=True)
+if LLM_PROVIDER == "gigachat":
+    _default_model_main = "GigaChat-2-Max"
+    _default_model_code = "GigaChat-2-Pro"
+    _default_model_light = "GigaChat-2-Lite"
+else:
+    _default_model_main = "anthropic/claude-sonnet-4.6"
+    _default_model_code = "anthropic/claude-sonnet-4.6"
+    _default_model_light = DEFAULT_LIGHT_MODEL
+
+MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default=_default_model_main, allow_legacy_secret=True)
+MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default=_default_model_code, allow_legacy_secret=True)
+MODEL_LIGHT = get_cfg("OUROBOROS_MODEL_LIGHT", default=_default_model_light, allow_legacy_secret=True)
 
 BUDGET_REPORT_EVERY_MESSAGES = 10
 SOFT_TIMEOUT_SEC = max(60, int(get_cfg("OUROBOROS_SOFT_TIMEOUT_SEC", default="600", allow_legacy_secret=True) or "600"))
@@ -153,10 +162,16 @@ os.environ["OPENAI_API_KEY"] = str(OPENAI_API_KEY or "")
 os.environ["ANTHROPIC_API_KEY"] = str(ANTHROPIC_API_KEY or "")
 os.environ["GITHUB_USER"] = str(GITHUB_USER)
 os.environ["GITHUB_REPO"] = str(GITHUB_REPO)
-os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN or "anthropic/claude-sonnet-4.6")
-os.environ["OUROBOROS_MODEL_CODE"] = str(MODEL_CODE or "anthropic/claude-sonnet-4.6")
+os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN or _default_model_main)
+os.environ["OUROBOROS_MODEL_CODE"] = str(MODEL_CODE or _default_model_code)
 if MODEL_LIGHT:
     os.environ["OUROBOROS_MODEL_LIGHT"] = str(MODEL_LIGHT)
+if LLM_PROVIDER == "gigachat":
+    # Recommended defaults for long technical answers.
+    os.environ["GIGACHAT_SCOPE"] = str(get_cfg("GIGACHAT_SCOPE", default="GIGACHAT_API_PERS", allow_legacy_secret=True) or "GIGACHAT_API_PERS")
+    os.environ["GIGACHAT_REPETITION_PENALTY"] = str(get_cfg("GIGACHAT_REPETITION_PENALTY", default="1.1", allow_legacy_secret=True) or "1.1")
+    os.environ["GIGACHAT_PROFANITY_CHECK"] = str(get_cfg("GIGACHAT_PROFANITY_CHECK", default="false", allow_legacy_secret=True) or "false")
+    os.environ["GIGACHAT_STREAM_UPDATE_INTERVAL"] = str(get_cfg("GIGACHAT_STREAM_UPDATE_INTERVAL", default="1", allow_legacy_secret=True) or "1")
 os.environ["OUROBOROS_DIAG_HEARTBEAT_SEC"] = str(DIAG_HEARTBEAT_SEC)
 os.environ["OUROBOROS_DIAG_SLOW_CYCLE_SEC"] = str(DIAG_SLOW_CYCLE_SEC)
 os.environ["TELEGRAM_BOT_TOKEN"] = str(TELEGRAM_BOT_TOKEN)

@@ -296,8 +296,38 @@ class LLMClient:
                     msg["content"] = "[SYSTEM] " + str(msg.get("content") or "")
                 else:
                     system_seen = True
+            # Bridge OpenAI tool role to GigaChat function role.
+            if msg.get("role") == "tool":
+                msg["role"] = "function"
+                if not msg.get("name"):
+                    msg["name"] = str(msg.get("tool_call_id") or "tool")
+            # Bridge assistant.tool_calls to legacy assistant.function_call shape.
+            if msg.get("role") == "assistant" and msg.get("tool_calls") and not msg.get("function_call"):
+                tc0 = (msg.get("tool_calls") or [{}])[0]
+                fn = tc0.get("function") if isinstance(tc0, dict) else {}
+                if isinstance(fn, dict) and fn.get("name"):
+                    msg["function_call"] = {
+                        "name": str(fn.get("name")),
+                        "arguments": fn.get("arguments", "{}"),
+                    }
             result.append(msg)
         return result
+
+    @staticmethod
+    def _tool_choice_to_function_call(tool_choice: Any) -> Any:
+        """Map OpenAI-style tool_choice to legacy function_call for GigaChat."""
+        if isinstance(tool_choice, str):
+            v = tool_choice.strip().lower()
+            if v in {"auto", "none"}:
+                return v
+            if v in {"required", "any"}:
+                return "auto"
+            return "auto"
+        if isinstance(tool_choice, dict):
+            fn = tool_choice.get("function")
+            if isinstance(fn, dict) and fn.get("name"):
+                return {"name": str(fn.get("name"))}
+        return "auto"
 
     @staticmethod
     def _normalize_response_message(provider: str, msg: Dict[str, Any]) -> Dict[str, Any]:
@@ -442,8 +472,21 @@ class LLMClient:
                 last_tool = {**tools_with_cache[-1]}  # copy last tool
                 last_tool["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
                 tools_with_cache[-1] = last_tool
-            kwargs["tools"] = tools_with_cache
-            kwargs["tool_choice"] = tool_choice
+            if self._provider == "gigachat":
+                # GigaChat compatibility: prefer legacy function-calling keys.
+                functions = []
+                for t in tools_with_cache:
+                    if not isinstance(t, dict):
+                        continue
+                    fn = t.get("function")
+                    if isinstance(fn, dict) and fn.get("name"):
+                        functions.append(fn)
+                if functions:
+                    kwargs["functions"] = functions
+                    kwargs["function_call"] = self._tool_choice_to_function_call(tool_choice)
+            else:
+                kwargs["tools"] = tools_with_cache
+                kwargs["tool_choice"] = tool_choice
 
         try:
             resp = client.chat.completions.create(**kwargs)

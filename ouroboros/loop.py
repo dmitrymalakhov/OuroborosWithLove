@@ -961,6 +961,7 @@ def _process_tool_results(
         # Append tool result message
         messages.append({
             "role": "tool",
+            "name": fn_name,
             "tool_call_id": exec_result["tool_call_id"],
             "content": truncated_result
         })

@@ -90,7 +90,17 @@ def _parse_int_cfg(raw: Optional[str], default: int, minimum: int = 0) -> int:
         val = default
     return max(minimum, val)
 
-OPENROUTER_API_KEY = get_secret("OPENROUTER_API_KEY", required=True)
+LLM_PROVIDER = str(get_cfg("OUROBOROS_LLM_PROVIDER", default="openrouter", allow_legacy_secret=True) or "openrouter").strip().lower()
+if LLM_PROVIDER not in {"openrouter", "gigachat"}:
+    raise AssertionError("OUROBOROS_LLM_PROVIDER must be one of: openrouter, gigachat")
+
+OPENROUTER_API_KEY = get_secret("OPENROUTER_API_KEY", required=(LLM_PROVIDER == "openrouter"))
+GIGACHAT_AUTHORIZATION_KEY = get_secret("GIGACHAT_AUTHORIZATION_KEY", required=False)
+GIGACHAT_ACCESS_TOKEN = get_secret("GIGACHAT_ACCESS_TOKEN", required=False)
+if LLM_PROVIDER == "gigachat":
+    assert (GIGACHAT_AUTHORIZATION_KEY and str(GIGACHAT_AUTHORIZATION_KEY).strip()) or (
+        GIGACHAT_ACCESS_TOKEN and str(GIGACHAT_ACCESS_TOKEN).strip()
+    ), "For gigachat provider set GIGACHAT_AUTHORIZATION_KEY or GIGACHAT_ACCESS_TOKEN"
 TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", required=True)
 TOTAL_BUDGET_DEFAULT = get_secret("TOTAL_BUDGET", required=True)
 GITHUB_TOKEN = get_secret("GITHUB_TOKEN", required=True)
@@ -134,6 +144,11 @@ DIAG_SLOW_CYCLE_SEC = _parse_int_cfg(
 )
 
 os.environ["OPENROUTER_API_KEY"] = str(OPENROUTER_API_KEY)
+os.environ["OUROBOROS_LLM_PROVIDER"] = str(LLM_PROVIDER)
+if GIGACHAT_AUTHORIZATION_KEY:
+    os.environ["GIGACHAT_AUTHORIZATION_KEY"] = str(GIGACHAT_AUTHORIZATION_KEY)
+if GIGACHAT_ACCESS_TOKEN:
+    os.environ["GIGACHAT_ACCESS_TOKEN"] = str(GIGACHAT_ACCESS_TOKEN)
 os.environ["OPENAI_API_KEY"] = str(OPENAI_API_KEY or "")
 os.environ["ANTHROPIC_API_KEY"] = str(ANTHROPIC_API_KEY or "")
 os.environ["GITHUB_USER"] = str(GITHUB_USER)

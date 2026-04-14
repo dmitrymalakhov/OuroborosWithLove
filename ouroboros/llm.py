@@ -12,6 +12,7 @@ import os
 import time
 import uuid
 import base64
+import json
 import mimetypes
 import re
 from urllib.parse import urlparse
@@ -313,12 +314,28 @@ class LLMClient:
                     tc0 = (msg.get("tool_calls") or [{}])[0]
                     fn = tc0.get("function") if isinstance(tc0, dict) else {}
                     if isinstance(fn, dict) and fn.get("name"):
+                        args = fn.get("arguments", "{}")
+                        if isinstance(args, dict):
+                            args = json.dumps(args, ensure_ascii=False)
                         msg["function_call"] = {
                             "name": str(fn.get("name")),
-                            "arguments": fn.get("arguments", "{}"),
+                            "arguments": args,
                         }
                 # GigaChat rejects OpenAI-native tool_calls in message history.
                 msg.pop("tool_calls", None)
+            # Ensure legacy function_call payload is a JSON string for GigaChat.
+            if msg.get("role") == "assistant" and isinstance(msg.get("function_call"), dict):
+                fn = dict(msg.get("function_call") or {})
+                args = fn.get("arguments", "{}")
+                if isinstance(args, dict):
+                    args = json.dumps(args, ensure_ascii=False)
+                elif args is None:
+                    args = "{}"
+                fn["arguments"] = args
+                fn["name"] = str(fn.get("name") or "")
+                msg["function_call"] = fn
+                if not msg.get("content"):
+                    msg["content"] = ""
             result.append(msg)
         return result
 
@@ -553,6 +570,15 @@ class LLMClient:
         if use_stream:
             kwargs["stream"] = True
             kwargs.setdefault("extra_body", {})["update_interval"] = int(os.environ.get("GIGACHAT_STREAM_UPDATE_INTERVAL", "1"))
+
+        if self._provider == "gigachat":
+            try:
+                log.debug(
+                    "GigaChat request payload messages (first 500 chars): %s",
+                    json.dumps(kwargs.get("messages") or [], ensure_ascii=False)[:500],
+                )
+            except Exception:
+                log.debug("Failed to serialize GigaChat request messages for debug logging", exc_info=True)
 
         try:
             resp = client.chat.completions.create(**kwargs)

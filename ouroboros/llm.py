@@ -160,7 +160,7 @@ class LLMClient:
             "Authorization": f"Basic {self._authorization_key}",
         }
         payload = {"scope": self._oauth_scope}
-        resp = requests.post(self._oauth_url, data=payload, headers=headers, timeout=15)
+        resp = requests.post(self._oauth_url, data=payload, headers=headers, timeout=15, verify=False)
         resp.raise_for_status()
         data = resp.json()
         token = str(data.get("access_token") or "").strip()
@@ -209,12 +209,12 @@ class LLMClient:
         headers = {"Authorization": f"Bearer {self._api_key}"}
         files = {"file": (filename, content, mime)}
         data = {"purpose": "general"}
-        resp = requests.post(upload_url, headers=headers, files=files, data=data, timeout=30)
+        resp = requests.post(upload_url, headers=headers, files=files, data=data, timeout=30, verify=False)
         if resp.status_code == 401:
             # Token might be stale (especially if user provided pre-issued token).
             self._ensure_gigachat_token(force_refresh=True)
             headers = {"Authorization": f"Bearer {self._api_key}"}
-            resp = requests.post(upload_url, headers=headers, files=files, data=data, timeout=30)
+            resp = requests.post(upload_url, headers=headers, files=files, data=data, timeout=30, verify=False)
         resp.raise_for_status()
         payload = resp.json() or {}
         file_id = str(payload.get("id") or "").strip()
@@ -227,14 +227,22 @@ class LLMClient:
             self._ensure_gigachat_token()
         if self._client is None:
             from openai import OpenAI
-            self._client = OpenAI(
-                base_url=self._base_url,
-                api_key=self._api_key,
-                default_headers={
-                    "HTTP-Referer": "https://colab.research.google.com/",
-                    "X-Title": "Ouroboros",
-                },
-            )
+            if self._provider == "gigachat":
+                import httpx
+                self._client = OpenAI(
+                    base_url=self._base_url,
+                    api_key=self._api_key,
+                    http_client=httpx.Client(verify=False),
+                )
+            else:
+                self._client = OpenAI(
+                    base_url=self._base_url,
+                    api_key=self._api_key,
+                    default_headers={
+                        "HTTP-Referer": "https://colab.research.google.com/",
+                        "X-Title": "Ouroboros",
+                    },
+                )
         return self._client
 
     def _fetch_generation_cost(self, generation_id: str) -> Optional[float]:
@@ -263,6 +271,34 @@ class LLMClient:
             pass
         return None
 
+
+    @staticmethod
+    def _normalize_messages_for_gigachat(messages):
+        """Flatten Anthropic-style content blocks and fix message roles for GigaChat."""
+        result = []
+        system_seen = False
+        for msg in messages:
+            msg = dict(msg)
+            # Flatten content arrays (Anthropic cache blocks) to plain strings
+            content = msg.get("content")
+            if isinstance(content, list):
+                parts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        parts.append(str(block.get("text") or ""))
+                    elif isinstance(block, str):
+                        parts.append(block)
+                msg["content"] = "\n\n".join(p for p in parts if p)
+            # GigaChat: system role only allowed as the very first message
+            if msg.get("role") == "system":
+                if system_seen:
+                    msg["role"] = "user"
+                    msg["content"] = "[SYSTEM] " + str(msg.get("content") or "")
+                else:
+                    system_seen = True
+            result.append(msg)
+        return result
+
     def chat(
         self,
         messages: List[Dict[str, Any]],
@@ -273,6 +309,8 @@ class LLMClient:
         tool_choice: str = "auto",
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Single LLM call. Returns: (response_message_dict, usage_dict with cost)."""
+        if self._provider == "gigachat":
+            messages = self._normalize_messages_for_gigachat(messages)
         client = self._get_client()
         effort = normalize_reasoning_effort(reasoning_effort)
 

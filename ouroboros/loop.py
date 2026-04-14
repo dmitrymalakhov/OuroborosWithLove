@@ -148,9 +148,15 @@ def _execute_single_tool(
     is_code_tool = fn_name in tools.CODE_TOOLS
 
     # Parse arguments
+    raw_args = tc["function"].get("arguments", "{}")
     try:
-        args = json.loads(tc["function"]["arguments"] or "{}")
-    except (json.JSONDecodeError, ValueError) as e:
+        if isinstance(raw_args, dict):
+            args = raw_args
+        elif raw_args is None:
+            args = {}
+        else:
+            args = json.loads(raw_args or "{}")
+    except (json.JSONDecodeError, ValueError, TypeError) as e:
         result = f"⚠️ TOOL_ARG_ERROR: Could not parse arguments for '{fn_name}': {e}"
         return {
             "tool_call_id": tool_call_id,

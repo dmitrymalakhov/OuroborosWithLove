@@ -299,6 +299,76 @@ class LLMClient:
             result.append(msg)
         return result
 
+    @staticmethod
+    def _normalize_response_message(provider: str, msg: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Normalize provider-specific response payload to OpenAI-like shape.
+
+        GigaChat can return tool requests either as `tool_calls` or legacy
+        `function_call`. The loop expects `tool_calls`, so map legacy format.
+        """
+        if not isinstance(msg, dict):
+            return {}
+
+        normalized = dict(msg)
+
+        # Ensure content is always a plain string for loop/content checks.
+        content = normalized.get("content")
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text":
+                        parts.append(str(block.get("text") or ""))
+                    elif block.get("text"):
+                        parts.append(str(block.get("text")))
+                elif isinstance(block, str):
+                    parts.append(block)
+            normalized["content"] = "\n\n".join(p for p in parts if p)
+
+        if provider != "gigachat":
+            return normalized
+
+        # Legacy function_call -> tool_calls bridge.
+        if not normalized.get("tool_calls"):
+            fc = normalized.get("function_call")
+            if isinstance(fc, dict) and fc.get("name"):
+                arguments = fc.get("arguments", "{}")
+                if isinstance(arguments, dict):
+                    import json as _json
+                    arguments = _json.dumps(arguments, ensure_ascii=False)
+                normalized["tool_calls"] = [{
+                    "id": str(fc.get("id") or f"call_{uuid.uuid4().hex[:12]}"),
+                    "type": "function",
+                    "function": {
+                        "name": str(fc.get("name")),
+                        "arguments": str(arguments or "{}"),
+                    },
+                }]
+
+        # Some SDK adapters may return dict arguments even inside tool_calls.
+        tc_list = normalized.get("tool_calls")
+        if isinstance(tc_list, list):
+            import json as _json
+            normalized_tc = []
+            for tc in tc_list:
+                if not isinstance(tc, dict):
+                    continue
+                tc2 = dict(tc)
+                fn = tc2.get("function")
+                if isinstance(fn, dict):
+                    fn2 = dict(fn)
+                    args = fn2.get("arguments")
+                    if isinstance(args, dict):
+                        fn2["arguments"] = _json.dumps(args, ensure_ascii=False)
+                    elif args is None:
+                        fn2["arguments"] = "{}"
+                    tc2["function"] = fn2
+                normalized_tc.append(tc2)
+            normalized["tool_calls"] = normalized_tc
+
+        return normalized
+
     def chat(
         self,
         messages: List[Dict[str, Any]],
@@ -362,6 +432,7 @@ class LLMClient:
         usage = resp_dict.get("usage") or {}
         choices = resp_dict.get("choices") or [{}]
         msg = (choices[0] if choices else {}).get("message") or {}
+        msg = self._normalize_response_message(self._provider, msg)
 
         # Extract cached_tokens from prompt_tokens_details if available
         if not usage.get("cached_tokens"):

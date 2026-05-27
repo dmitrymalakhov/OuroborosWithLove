@@ -285,6 +285,7 @@ users_init(DRIVE_ROOT)
 
 from supervisor.telegram import (
     init as telegram_init, TelegramClient, send_with_budget, log_chat,
+    save_incoming_document,
 )
 TG = TelegramClient(str(TELEGRAM_BOT_TOKEN))
 telegram_init(
@@ -622,8 +623,9 @@ while True:
         caption = str(msg.get("caption") or "")
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-        # Extract image if present
+        # Extract image if present; save regular documents after user workspace is resolved.
         image_data = None  # Will be (base64, mime_type, caption) or None
+        pending_document = None
         if msg.get("photo"):
             # photo is array of PhotoSize, last one is largest
             best_photo = msg["photo"][-1]
@@ -641,6 +643,8 @@ while True:
                     b64, mime = TG.download_file_base64(file_id)
                     if b64:
                         image_data = (b64, mime, caption)
+            else:
+                pending_document = doc
 
         st = load_state()
         owner_missing = st.get("owner_id") is None
@@ -667,7 +671,47 @@ while True:
             role=user_role, use_global_root=is_admin,
         )
 
-        log_chat("in", chat_id, user_id, text, drive_root=user_drive_root)
+        saved_document = None
+        document_download_failed = False
+        if pending_document is not None:
+            file_id = str(pending_document.get("file_id") or "")
+            if file_id:
+                file_bytes, detected_mime, _telegram_path = TG.download_file_bytes(file_id)
+                if file_bytes:
+                    saved_document = save_incoming_document(
+                        user_drive_root,
+                        file_bytes=file_bytes,
+                        original_name=str(pending_document.get("file_name") or "telegram_document"),
+                        mime_type=str(pending_document.get("mime_type") or detected_mime or ""),
+                        telegram_file_id=file_id,
+                        telegram_file_unique_id=str(pending_document.get("file_unique_id") or ""),
+                        caption=caption,
+                        message_id=int(msg.get("message_id") or 0),
+                    )
+                    append_jsonl(user_drive_root / "logs" / "events.jsonl", {
+                        "ts": now_iso,
+                        "type": "telegram_document_saved",
+                        "path": saved_document.get("path"),
+                        "mime_type": saved_document.get("mime_type"),
+                        "size_bytes": saved_document.get("size_bytes"),
+                    })
+                else:
+                    append_jsonl(user_drive_root / "logs" / "events.jsonl", {
+                        "ts": now_iso,
+                        "type": "telegram_document_download_failed",
+                        "file_name": str(pending_document.get("file_name") or ""),
+                        "mime_type": str(pending_document.get("mime_type") or ""),
+                    })
+                    document_download_failed = True
+            else:
+                document_download_failed = True
+
+        log_text = text
+        if saved_document:
+            log_text = (text or caption or "") + f"\n[attached document saved: {saved_document['path']}]"
+        elif document_download_failed:
+            log_text = (text or caption or "") + "\n[attached document download failed]"
+        log_chat("in", chat_id, user_id, log_text, drive_root=user_drive_root)
         if is_admin:
             st["last_owner_message_at"] = now_iso
         else:
@@ -706,8 +750,17 @@ while True:
             )
             continue
 
+        if document_download_failed:
+            send_with_budget(
+                chat_id,
+                "⚠️ I could not download the attached document from Telegram. Please send the file again.",
+                log_drive_root=user_drive_root,
+                log_user_id=user_id,
+            )
+            continue
+
         # All other messages (and dual-path commands) → direct chat with Ouroboros
-        if not text and not image_data:
+        if not text and not image_data and not saved_document:
             continue  # empty message, skip
 
         # Feed observation to consciousness
@@ -727,6 +780,17 @@ while True:
                     log_drive_root=user_drive_root,
                     log_user_id=user_id,
                 )
+            elif saved_document:
+                doc_note = (
+                    f"{text or caption or 'Document attached.'}\n\n"
+                    "[Telegram document saved]\n"
+                    f"- path: {saved_document['path']}\n"
+                    f"- filename: {saved_document['filename']}\n"
+                    f"- mime_type: {saved_document['mime_type']}\n"
+                    f"- size_bytes: {saved_document['size_bytes']}\n"
+                    "Use analyze_document(path='<path>', source='drive') if this file is relevant."
+                )
+                agent.inject_message(doc_note)
             elif text:
                 agent.inject_message(text)
 
@@ -736,6 +800,16 @@ while True:
             # into the same conversation instead of launching a parallel task.
             agent._dispatching = True
             final_text = text
+            if saved_document:
+                doc_note = (
+                    "\n\n[Telegram document saved]\n"
+                    f"- path: {saved_document['path']}\n"
+                    f"- filename: {saved_document['filename']}\n"
+                    f"- mime_type: {saved_document['mime_type']}\n"
+                    f"- size_bytes: {saved_document['size_bytes']}\n"
+                    "Use analyze_document(path='<path>', source='drive') if the user asks about this file."
+                )
+                final_text = (text or caption or "Please analyze the attached document.") + doc_note
             if is_admin:
                 _consciousness.pause()
 

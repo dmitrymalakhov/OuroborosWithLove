@@ -10,6 +10,7 @@ import datetime
 import logging
 import pathlib
 import re
+import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -133,38 +134,106 @@ class TelegramClient:
                 time.sleep(0.8 * (attempt + 1))
         return False, last_err
 
-    def download_file_base64(self, file_id: str, max_bytes: int = 10_000_000) -> Tuple[Optional[str], str]:
-        """Download a file from Telegram and return (base64_data, mime_type). Returns (None, "") on failure."""
+    def download_file_bytes(self, file_id: str, max_bytes: int = 50_000_000) -> Tuple[Optional[bytes], str, str]:
+        """Download a Telegram file and return (bytes, mime_type, telegram_file_path)."""
         try:
-            # Get file path
             r = requests.get(f"{self.base}/getFile", params={"file_id": file_id}, timeout=10)
             r.raise_for_status()
             data = r.json()
             if not data.get("ok"):
-                return None, ""
+                return None, "", ""
             file_path = data["result"].get("file_path", "")
             file_size = int(data["result"].get("file_size") or 0)
             if file_size > max_bytes:
-                return None, ""
+                return None, "", file_path
 
-            # Download file
             download_url = f"https://api.telegram.org/file/bot{self._token}/{file_path}"
             r2 = requests.get(download_url, timeout=30)
             r2.raise_for_status()
 
-            import base64
-            b64 = base64.b64encode(r2.content).decode("ascii")
-
-            # Guess mime type from extension
             ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
             mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-                        "gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp"}
-            mime = mime_map.get(ext, "image/jpeg")  # default to jpeg
+                        "gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp",
+                        "pdf": "application/pdf"}
+            mime = mime_map.get(ext, "application/octet-stream")
 
-            return b64, mime
+            return r2.content, mime, file_path
         except Exception:
             log.warning("Failed to download file_id=%s from Telegram", file_id, exc_info=True)
+            return None, "", ""
+
+    def download_file_base64(self, file_id: str, max_bytes: int = 10_000_000) -> Tuple[Optional[str], str]:
+        """Download a file from Telegram and return (base64_data, mime_type). Returns (None, "") on failure."""
+        content, mime, _file_path = self.download_file_bytes(file_id, max_bytes=max_bytes)
+        if content is None:
             return None, ""
+        import base64
+        return base64.b64encode(content).decode("ascii"), mime if mime.startswith("image/") else "image/jpeg"
+
+
+# ---------------------------------------------------------------------------
+# Incoming file persistence
+# ---------------------------------------------------------------------------
+
+def _safe_upload_filename(name: str, fallback: str = "telegram_file") -> str:
+    name = unicodedata.normalize("NFC", str(name or "")).strip()
+    name = name.replace("\\", "_").replace("/", "_").replace(":", "_")
+    name = "".join(c for c in name if ord(c) >= 32)
+    name = re.sub(r"\s+", " ", name).strip(" .")
+    if not name:
+        name = fallback
+    if len(name) > 180:
+        stem = pathlib.Path(name).stem[:140].strip(" .") or fallback
+        suffix = pathlib.Path(name).suffix[:20]
+        name = stem + suffix
+    return name
+
+
+def save_incoming_document(
+    drive_root: pathlib.Path,
+    *,
+    file_bytes: bytes,
+    original_name: str,
+    mime_type: str,
+    telegram_file_id: str,
+    telegram_file_unique_id: str = "",
+    caption: str = "",
+    message_id: int = 0,
+) -> Dict[str, Any]:
+    """Persist a Telegram document in the user's workspace and return metadata."""
+    root = pathlib.Path(drive_root)
+    day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    upload_dir = root / "uploads" / day
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = _safe_upload_filename(original_name)
+    prefix = str(int(message_id)) if message_id else datetime.datetime.now(datetime.timezone.utc).strftime("%H%M%S")
+    rel_path = pathlib.PurePosixPath("uploads") / day / f"{prefix}_{safe_name}"
+    path = root / rel_path
+    counter = 2
+    while path.exists():
+        stem = pathlib.Path(safe_name).stem
+        suffix = pathlib.Path(safe_name).suffix
+        rel_path = pathlib.PurePosixPath("uploads") / day / f"{prefix}_{stem}_{counter}{suffix}"
+        path = root / rel_path
+        counter += 1
+
+    path.write_bytes(file_bytes)
+    meta = {
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "type": "telegram_document_saved",
+        "path": str(rel_path),
+        "filename": safe_name,
+        "original_name": original_name or safe_name,
+        "mime_type": mime_type,
+        "size_bytes": len(file_bytes),
+        "telegram_file_id": telegram_file_id,
+        "telegram_file_unique_id": telegram_file_unique_id,
+        "caption": caption,
+        "message_id": message_id,
+    }
+    append_jsonl(root / "logs" / "uploads.jsonl", meta)
+    return meta
 
 
 # ---------------------------------------------------------------------------

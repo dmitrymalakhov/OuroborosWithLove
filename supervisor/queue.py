@@ -134,6 +134,8 @@ def persist_queue_snapshot(reason: str = "") -> None:
                 "text": t.get("text"), "priority": t.get("priority"),
                 "_attempt": t.get("_attempt"), "review_reason": t.get("review_reason"),
                 "review_source_task_id": t.get("review_source_task_id"),
+                "user_id": t.get("user_id"), "user_role": t.get("user_role"),
+                "drive_root": t.get("drive_root"),
             },
         })
     running_rows = []

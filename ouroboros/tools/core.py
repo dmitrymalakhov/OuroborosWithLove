@@ -16,6 +16,15 @@ from ouroboros.utils import read_text, safe_relpath, utc_now_iso
 log = logging.getLogger(__name__)
 
 
+def _scope(ctx: ToolContext) -> dict:
+    return {
+        "user_id": ctx.current_user_id,
+        "user_role": ctx.user_role,
+        "drive_root": str(ctx.drive_root),
+        "shared_drive_root": str(ctx.shared_drive_root or ctx.drive_root),
+    }
+
+
 def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]:
     target = (root / safe_relpath(rel)).resolve()
     if not target.exists():
@@ -86,6 +95,7 @@ def _send_photo(ctx: ToolContext, image_base64: str, caption: str = "") -> str:
         "chat_id": ctx.current_chat_id,
         "image_base64": actual_b64,
         "caption": caption or "",
+        **_scope(ctx),
     })
     return "OK: photo queued for delivery to owner."
 

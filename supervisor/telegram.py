@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import pathlib
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -374,7 +375,9 @@ def _send_markdown_telegram(chat_id: int, text: str) -> Tuple[bool, str]:
 # Budget + logging
 # ---------------------------------------------------------------------------
 
-def _format_budget_line(st: Dict[str, Any]) -> str:
+def _format_budget_line(st: Dict[str, Any], public: bool = False) -> str:
+    if public:
+        return "—\nBudget: shared pool active"
     spent = float(st.get("spent_usd") or 0.0)
     total = float(TOTAL_BUDGET_LIMIT or 0.0)
     pct = (spent / total * 100.0) if total > 0 else 0.0
@@ -383,14 +386,27 @@ def _format_budget_line(st: Dict[str, Any]) -> str:
     return f"—\nBudget: ${spent:.4f} / ${total:.2f} ({pct:.2f}%) | {branch}@{sha}"
 
 
-def budget_line(force: bool = False) -> str:
+def _is_budget_admin(st: Dict[str, Any], user_id: Optional[int]) -> bool:
+    if user_id is None:
+        return True
+    try:
+        uid = int(user_id)
+    except Exception:
+        return False
+    admin_ids = st.get("admin_user_ids")
+    if isinstance(admin_ids, list) and admin_ids:
+        return uid in {int(x) for x in admin_ids}
+    return uid == int(st.get("owner_id") or 0)
+
+
+def budget_line(force: bool = False, public: bool = False) -> str:
     try:
         st = load_state()
         every = max(1, int(BUDGET_REPORT_EVERY_MESSAGES))
         if force:
             st["budget_messages_since_report"] = 0
             save_state(st)
-            return _format_budget_line(st)
+            return _format_budget_line(st, public=public)
 
         counter = int(st.get("budget_messages_since_report") or 0) + 1
         if counter < every:
@@ -400,14 +416,16 @@ def budget_line(force: bool = False) -> str:
 
         st["budget_messages_since_report"] = 0
         save_state(st)
-        return _format_budget_line(st)
+        return _format_budget_line(st, public=public)
     except Exception:
         log.debug("Suppressed exception in budget_line", exc_info=True)
         return ""
 
 
-def log_chat(direction: str, chat_id: int, user_id: int, text: str) -> None:
-    append_jsonl(DRIVE_ROOT / "logs" / "chat.jsonl", {
+def log_chat(direction: str, chat_id: int, user_id: int, text: str,
+             drive_root: Optional[pathlib.Path] = None) -> None:
+    root = pathlib.Path(drive_root) if drive_root is not None else DRIVE_ROOT
+    append_jsonl(root / "logs" / "chat.jsonl", {
         "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "session_id": load_state().get("session_id"),
         "direction": direction,
@@ -419,20 +437,25 @@ def log_chat(direction: str, chat_id: int, user_id: int, text: str) -> None:
 
 def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                      force_budget: bool = False, fmt: str = "",
-                     is_progress: bool = False) -> None:
+                     is_progress: bool = False,
+                     log_drive_root: Optional[pathlib.Path] = None,
+                     log_user_id: Optional[int] = None) -> None:
     st = load_state()
-    owner_id = int(st.get("owner_id") or 0)
+    owner_id = int(log_user_id if log_user_id is not None else (st.get("owner_id") or 0))
+    public_budget = not _is_budget_admin(st, log_user_id if log_user_id is not None else owner_id)
     # Progress messages go to progress.jsonl instead of chat.jsonl
     # This keeps chat history clean for context building
     if is_progress:
-        append_jsonl(DRIVE_ROOT / "logs" / "progress.jsonl", {
+        root = pathlib.Path(log_drive_root) if log_drive_root is not None else DRIVE_ROOT
+        append_jsonl(root / "logs" / "progress.jsonl", {
             "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "direction": "out", "chat_id": chat_id, "user_id": owner_id,
             "text": text if log_text is None else log_text,
         })
     else:
-        log_chat("out", chat_id, owner_id, text if log_text is None else log_text)
-    budget = budget_line(force=force_budget)
+        log_chat("out", chat_id, owner_id, text if log_text is None else log_text,
+                 drive_root=log_drive_root)
+    budget = budget_line(force=force_budget, public=public_budget)
     _text = str(text or "")
     if not budget:
         if _text.strip() in ("", "\u200b"):

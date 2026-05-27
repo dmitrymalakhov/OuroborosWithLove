@@ -409,6 +409,8 @@ def _check_budget_limits(
     event_queue: Optional[queue.Queue],
     llm_trace: Dict[str, Any],
     task_type: str = "task",
+    user_id: Optional[int] = None,
+    user_role: str = "",
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
     """
     Check budget limits and handle budget overrun.
@@ -430,7 +432,8 @@ def _check_budget_limits(
         try:
             final_msg, final_cost = _call_llm_with_retry(
                 llm, messages, active_model, None, active_effort,
-                max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
+                max_retries, drive_logs, task_id, round_idx, event_queue,
+                accumulated_usage, task_type, user_id=user_id, user_role=user_role
             )
             if final_msg:
                 return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
@@ -601,6 +604,8 @@ def run_llm_loop(
     event_queue: Optional[queue.Queue] = None,
     initial_effort: str = "medium",
     drive_root: Optional[pathlib.Path] = None,
+    user_id: Optional[int] = None,
+    user_role: str = "",
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
     Core LLM-with-tools loop.
@@ -653,7 +658,8 @@ def run_llm_loop(
                 try:
                     final_msg, final_cost = _call_llm_with_retry(
                         llm, messages, active_model, None, active_effort,
-                        max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
+                        max_retries, drive_logs, task_id, round_idx, event_queue,
+                        accumulated_usage, task_type, user_id=user_id, user_role=user_role
                     )
                     if final_msg:
                         return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
@@ -693,7 +699,8 @@ def run_llm_loop(
             # --- LLM call with retry ---
             msg, cost = _call_llm_with_retry(
                 llm, messages, active_model, tool_schemas, active_effort,
-                max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
+                max_retries, drive_logs, task_id, round_idx, event_queue,
+                accumulated_usage, task_type, user_id=user_id, user_role=user_role
             )
 
             # Fallback to another model if primary model returns empty responses
@@ -722,7 +729,8 @@ def run_llm_loop(
                 # Try fallback model (don't increment round_idx — this is still same logical round)
                 msg, fallback_cost = _call_llm_with_retry(
                     llm, messages, fallback_model, tool_schemas, active_effort,
-                    max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
+                    max_retries, drive_logs, task_id, round_idx, event_queue,
+                    accumulated_usage, task_type, user_id=user_id, user_role=user_role
                 )
 
                 # If fallback also fails, give up
@@ -758,7 +766,8 @@ def run_llm_loop(
             budget_result = _check_budget_limits(
                 budget_remaining_usd, accumulated_usage, round_idx, messages,
                 llm, active_model, active_effort, max_retries, drive_logs,
-                task_id, event_queue, llm_trace, task_type
+                task_id, event_queue, llm_trace, task_type,
+                user_id=user_id, user_role=user_role
             )
             if budget_result is not None:
                 return budget_result
@@ -786,6 +795,8 @@ def _emit_llm_usage_event(
     usage: Dict[str, Any],
     cost: float,
     category: str = "task",
+    user_id: Optional[int] = None,
+    user_role: str = "",
 ) -> None:
     """
     Emit llm_usage event to the event queue.
@@ -814,6 +825,8 @@ def _emit_llm_usage_event(
             "cost_estimated": not bool(usage.get("cost")),
             "usage": usage,
             "category": category,
+            "user_id": user_id,
+            "user_role": user_role,
         })
     except Exception:
         log.debug("Failed to put llm_usage event to queue", exc_info=True)
@@ -832,6 +845,8 @@ def _call_llm_with_retry(
     event_queue: Optional[queue.Queue],
     accumulated_usage: Dict[str, Any],
     task_type: str = "",
+    user_id: Optional[int] = None,
+    user_role: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], float]:
     """
     Call LLM with retry logic, usage tracking, and event emission.
@@ -865,7 +880,7 @@ def _call_llm_with_retry(
 
             # Emit real-time usage event with category based on task_type
             category = task_type if task_type in ("evolution", "consciousness", "review", "summarize") else "task"
-            _emit_llm_usage_event(event_queue, task_id, model, usage, cost, category)
+            _emit_llm_usage_event(event_queue, task_id, model, usage, cost, category, user_id=user_id, user_role=user_role)
 
             # Empty response = retry-worthy (model sometimes returns empty content with no tool_calls)
             tool_calls = msg.get("tool_calls") or []

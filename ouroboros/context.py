@@ -68,7 +68,8 @@ def _build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
     # --- Budget calculation ---
     budget_info = None
     try:
-        state_json = _safe_read(env.drive_path("state/state.json"), fallback="{}")
+        shared_drive_path = getattr(env, "shared_drive_path", env.drive_path)
+        state_json = _safe_read(shared_drive_path("state/state.json"), fallback="{}")
         state_data = json.loads(state_json)
         spent_usd = float(state_data.get("spent_usd", 0))
         total_usd = float(os.environ.get("TOTAL_BUDGET", "1"))
@@ -83,6 +84,7 @@ def _build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
         "utc_now": utc_now_iso(),
         "repo_dir": str(env.repo_dir),
         "drive_root": str(env.drive_root),
+        "shared_drive_root": str(getattr(env, "shared_drive_root", None) or env.drive_root),
         "git_head": git_sha,
         "git_branch": git_branch,
         "task": {"id": task.get("id"), "type": task.get("type")},
@@ -177,7 +179,8 @@ def _build_health_invariants(env: Any) -> str:
 
     # 2. Budget drift
     try:
-        state_json = read_text(env.drive_path("state/state.json"))
+        shared_drive_path = getattr(env, "shared_drive_path", env.drive_path)
+        state_json = read_text(shared_drive_path("state/state.json"))
         state_data = json.loads(state_json)
         if state_data.get("budget_drift_alert"):
             drift_pct = state_data.get("budget_drift_pct", 0)
@@ -307,7 +310,8 @@ def build_llm_messages(
     )
     bible_md = _safe_read(env.repo_path("BIBLE.md"))
     readme_md = _safe_read(env.repo_path("README.md"))
-    state_json = _safe_read(env.drive_path("state/state.json"), fallback="{}")
+    shared_drive_path = getattr(env, "shared_drive_path", env.drive_path)
+    state_json = _safe_read(shared_drive_path("state/state.json"), fallback="{}")
 
     # --- Load memory ---
     memory.ensure_files()

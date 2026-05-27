@@ -118,6 +118,29 @@ MAX_WORKERS = int(get_cfg("OUROBOROS_MAX_WORKERS", default="5", allow_legacy_sec
 MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default="anthropic/claude-sonnet-4.6", allow_legacy_secret=True)
 MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default="anthropic/claude-sonnet-4.6", allow_legacy_secret=True)
 MODEL_LIGHT = get_cfg("OUROBOROS_MODEL_LIGHT", default=DEFAULT_LIGHT_MODEL, allow_legacy_secret=True)
+ADMIN_USER_IDS_RAW = get_cfg("OUROBOROS_ADMIN_USER_IDS", default="", allow_legacy_secret=True) or ""
+
+
+def _parse_admin_user_ids(raw: str) -> Set[int]:
+    ids: Set[int] = set()
+    for part in str(raw or "").replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ids.add(int(part))
+        except Exception:
+            log.warning("Ignoring invalid OUROBOROS_ADMIN_USER_IDS entry: %r", part)
+    return ids
+
+
+ADMIN_USER_IDS = _parse_admin_user_ids(ADMIN_USER_IDS_RAW)
+
+
+def _is_admin_user(user_id: int, st: Dict[str, Any]) -> bool:
+    if ADMIN_USER_IDS:
+        return int(user_id) in ADMIN_USER_IDS
+    return int(user_id) == int(st.get("owner_id") or 0)
 
 BUDGET_REPORT_EVERY_MESSAGES = 10
 SOFT_TIMEOUT_SEC = max(60, int(get_cfg("OUROBOROS_SOFT_TIMEOUT_SEC", default="600", allow_legacy_secret=True) or "600"))
@@ -158,7 +181,7 @@ if not pathlib.Path("/content/drive/MyDrive").exists():
 DRIVE_ROOT = pathlib.Path("/content/drive/MyDrive/Ouroboros").resolve()
 REPO_DIR = pathlib.Path("/content/ouroboros_repo").resolve()
 
-for sub in ["state", "logs", "memory", "index", "locks", "archive"]:
+for sub in ["state", "logs", "memory", "index", "locks", "archive", "users"]:
     (DRIVE_ROOT / sub).mkdir(parents=True, exist_ok=True)
 REPO_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -198,6 +221,17 @@ from supervisor.state import (
 )
 state_init(DRIVE_ROOT, TOTAL_BUDGET_LIMIT)
 init_state()
+_st_admin = load_state()
+if ADMIN_USER_IDS:
+    _st_admin["admin_user_ids"] = sorted(ADMIN_USER_IDS)
+else:
+    _st_admin.pop("admin_user_ids", None)
+save_state(_st_admin)
+
+from supervisor.users import (
+    init as users_init, ensure_user_workspace,
+)
+users_init(DRIVE_ROOT)
 
 from supervisor.telegram import (
     init as telegram_init, TelegramClient, send_with_budget, log_chat,
@@ -286,7 +320,9 @@ def _chat_watchdog_loop():
     while True:
         time.sleep(30)
         try:
-            agent = _get_chat_agent()
+            st_watch = load_state()
+            owner_uid = int(st_watch.get("owner_id") or 0) or None
+            agent = _get_chat_agent(user_id=owner_uid, drive_root=DRIVE_ROOT, user_role="admin")
             if not agent._busy:
                 soft_warned = False
                 continue
@@ -296,7 +332,7 @@ def _chat_watchdog_loop():
             total_sec = now - agent._task_started_ts
 
             if idle_sec >= HARD_TIMEOUT_SEC:
-                st = load_state()
+                st = st_watch
                 if st.get("owner_chat_id"):
                     send_with_budget(
                         int(st["owner_chat_id"]),
@@ -309,7 +345,7 @@ def _chat_watchdog_loop():
 
             if idle_sec >= SOFT_TIMEOUT_SEC and not soft_warned:
                 soft_warned = True
-                st = load_state()
+                st = st_watch
                 if st.get("owner_chat_id"):
                     send_with_budget(
                         int(st["owner_chat_id"]),
@@ -346,7 +382,8 @@ _consciousness = BackgroundConsciousness(
 def reset_chat_agent():
     """Reset the direct-mode chat agent (called by watchdog on hangs)."""
     import supervisor.workers as _w
-    _w._chat_agent = None
+    with _w._chat_agents_lock:
+        _w._chat_agents.clear()
 
 # ----------------------------
 # 7) Main loop
@@ -541,25 +578,49 @@ while True:
                         image_data = (b64, mime, caption)
 
         st = load_state()
-        if st.get("owner_id") is None:
+        owner_missing = st.get("owner_id") is None
+        user_allowed_as_admin = (not ADMIN_USER_IDS) or (user_id in ADMIN_USER_IDS)
+        if owner_missing and user_allowed_as_admin:
             st["owner_id"] = user_id
             st["owner_chat_id"] = chat_id
             st["last_owner_message_at"] = now_iso
+            if ADMIN_USER_IDS:
+                st["admin_user_ids"] = sorted(ADMIN_USER_IDS)
             save_state(st)
-            log_chat("in", chat_id, user_id, text)
+            ensure_user_workspace(
+                DRIVE_ROOT, user_id, chat_id, from_user,
+                role="admin", use_global_root=True,
+            )
+            log_chat("in", chat_id, user_id, text, drive_root=DRIVE_ROOT)
             send_with_budget(chat_id, "✅ Owner registered. Ouroboros online.")
             continue
 
-        if user_id != int(st.get("owner_id")):
-            continue
+        is_admin = _is_admin_user(user_id, st)
+        user_role = "admin" if is_admin else "user"
+        user_drive_root, user_created, _user_record = ensure_user_workspace(
+            DRIVE_ROOT, user_id, chat_id, from_user,
+            role=user_role, use_global_root=is_admin,
+        )
 
-        log_chat("in", chat_id, user_id, text)
-        st["last_owner_message_at"] = now_iso
+        log_chat("in", chat_id, user_id, text, drive_root=user_drive_root)
+        if is_admin:
+            st["last_owner_message_at"] = now_iso
+        else:
+            st["last_user_message_at"] = now_iso
         _last_message_ts = time.time()
         save_state(st)
 
+        if user_created and not is_admin and text.strip().lower().startswith("/start"):
+            send_with_budget(
+                chat_id,
+                "✅ User workspace initialized. You can use this bot as your personal agent.",
+                log_drive_root=user_drive_root,
+                log_user_id=user_id,
+            )
+            continue
+
         # --- Supervisor commands ---
-        if text.strip().lower().startswith("/"):
+        if text.strip().lower().startswith("/") and is_admin:
             try:
                 result = _handle_supervisor_command(text, chat_id, tg_offset=offset)
                 if result is True:
@@ -571,116 +632,79 @@ while True:
             except Exception:
                 log.warning("Supervisor command handler error", exc_info=True)
 
+        if text.strip().lower().startswith("/start") and not is_admin:
+            send_with_budget(
+                chat_id,
+                "✅ Your personal workspace is ready. Send a message to start working with the agent.",
+                log_drive_root=user_drive_root,
+                log_user_id=user_id,
+            )
+            continue
+
         # All other messages (and dual-path commands) → direct chat with Ouroboros
         if not text and not image_data:
             continue  # empty message, skip
 
         # Feed observation to consciousness
-        _consciousness.inject_observation(f"Owner message: {text[:100]}")
+        if is_admin:
+            _consciousness.inject_observation(f"Owner message: {text[:100]}")
 
-        agent = _get_chat_agent()
+        agent = _get_chat_agent(user_id=user_id, drive_root=user_drive_root, user_role=user_role)
 
-        if agent._busy:
+        if agent._busy or getattr(agent, "_dispatching", False):
             # BUSY PATH: inject into active conversation (single consumer)
             if image_data:
                 if text:
                     agent.inject_message(text)
-                send_with_budget(chat_id, "📎 Photo received, but a task is in progress. Send again when I'm free.")
+                send_with_budget(
+                    chat_id,
+                    "📎 Photo received, but a task is in progress. Send again when I'm free.",
+                    log_drive_root=user_drive_root,
+                    log_user_id=user_id,
+                )
             elif text:
                 agent.inject_message(text)
 
         else:
-            # FREE PATH: batch-collect burst messages, then dispatch (single consumer)
-            # Batch-collect burst messages: wait briefly for follow-up messages
-            # This prevents "do X" → "cancel" race conditions
-            _BATCH_WINDOW_SEC = 1.5  # collect messages for 1500ms
-            _EARLY_EXIT_SEC = 0.15   # if no burst within 150ms → dispatch immediately
-            _batch_start = time.time()
-            _batch_deadline = _batch_start + _BATCH_WINDOW_SEC
-            _batched_texts = [text] if text else []
-            _batched_image = image_data  # keep first image
-
-            _batch_state = load_state()
-            _batch_state_dirty = False
-            while time.time() < _batch_deadline:
-                time.sleep(0.1)
-                try:
-                    _extra_updates = TG.get_updates(offset=offset, timeout=0) or []
-                except Exception:
-                    _extra_updates = []
-                if not _extra_updates and (time.time() - _batch_start) < _EARLY_EXIT_SEC:
-                    # No follow-up messages in first 150ms → single message, dispatch immediately
-                    break
-                for _upd in _extra_updates:
-                    offset = max(offset, int(_upd.get("update_id", offset - 1)) + 1)
-                    _msg2 = _upd.get("message") or _upd.get("edited_message") or {}
-                    _uid2 = (_msg2.get("from") or {}).get("id")
-                    _cid2 = (_msg2.get("chat") or {}).get("id")
-                    _txt2 = _msg2.get("text") or _msg2.get("caption") or ""
-                    if _uid2 and _batch_state.get("owner_id") and _uid2 == int(_batch_state["owner_id"]):
-                        log_chat("in", _cid2, _uid2, _txt2)
-                        _batch_state["last_owner_message_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                        _batch_state_dirty = True
-                        # Handle supervisor commands in batch window
-                        if _txt2.strip().lower().startswith("/"):
-                            try:
-                                _cmd_result = _handle_supervisor_command(_txt2, _cid2, tg_offset=offset)
-                                if _cmd_result is True:
-                                    continue  # terminal command, don't batch
-                                elif _cmd_result:
-                                    _txt2 = _cmd_result + _txt2  # dual-path: prepend note
-                            except SystemExit:
-                                raise
-                            except Exception:
-                                log.warning("Supervisor command in batch failed", exc_info=True)
-                        if _txt2:
-                            _batched_texts.append(_txt2)
-                            _batch_deadline = max(_batch_deadline, time.time() + 0.3)  # extend for burst
-                        if not _batched_image:
-                            _doc2 = _msg2.get("document") or {}
-                            _photo2 = (_msg2.get("photo") or [None])[-1] or {}
-                            _fid2 = _photo2.get("file_id") or _doc2.get("file_id")
-                            if _fid2:
-                                _b642, _mime2 = TG.download_file_base64(_fid2)
-                                if _b642:
-                                    _batched_image = (_b642, _mime2, _txt2)
-
-            # Save state once if mutated during batch window
-            if _batch_state_dirty:
-                save_state(_batch_state)
-
-            # Merge all batched texts into one message
-            if len(_batched_texts) > 1:
-                final_text = "\n\n".join(_batched_texts)
-                log.info("Message batch: %d messages merged into one", len(_batched_texts))
-            elif _batched_texts:
-                final_text = _batched_texts[0]
-            else:
-                final_text = text  # fallback to original
-
-            # Re-check if agent became busy during batch window (race condition fix)
-            if agent._busy:
-                if final_text:
-                    agent.inject_message(final_text)
-                if _batched_image:
-                    send_with_budget(chat_id, "📎 Photo received, but a task is in progress. Send again when I'm free.")
-            else:
-                # Dispatch to direct chat handler
+            # FREE PATH: mark dispatching before starting the thread so any
+            # immediately following Telegram update for this user is injected
+            # into the same conversation instead of launching a parallel task.
+            agent._dispatching = True
+            final_text = text
+            if is_admin:
                 _consciousness.pause()
-                def _run_task_and_resume(cid, txt, img):
-                    try:
-                        handle_chat_direct(cid, txt, img)
-                    finally:
-                        _consciousness.resume()
-                _t = threading.Thread(
-                    target=_run_task_and_resume,
-                    args=(chat_id, final_text, _batched_image),
-                    daemon=True,
-                )
+
+            def _run_task_and_resume(
+                cid, txt, img,
+                _user_id=user_id,
+                _user_role=user_role,
+                _user_drive_root=user_drive_root,
+                _is_admin=is_admin,
+                _agent=agent,
+            ):
                 try:
-                    _t.start()
-                except Exception as _te:
-                    log.error("Failed to start chat thread: %s", _te)
+                    handle_chat_direct(
+                        cid, txt, img,
+                        user_id=_user_id,
+                        user_role=_user_role,
+                        drive_root=_user_drive_root,
+                    )
+                finally:
+                    _agent._dispatching = False
+                    if _is_admin:
+                        _consciousness.resume()
+
+            _t = threading.Thread(
+                target=_run_task_and_resume,
+                args=(chat_id, final_text, image_data),
+                daemon=True,
+            )
+            try:
+                _t.start()
+            except Exception as _te:
+                agent._dispatching = False
+                log.error("Failed to start chat thread: %s", _te)
+                if is_admin:
                     _consciousness.resume()  # ensure resume if thread fails to start
 
     st = load_state()

@@ -11,6 +11,7 @@ import datetime
 import json
 import logging
 import os
+import pathlib
 import sys
 import time
 import uuid
@@ -19,6 +20,35 @@ from typing import Any, Dict, Optional
 # Lazy imports to avoid circular dependencies — everything comes through ctx
 
 log = logging.getLogger(__name__)
+
+
+def _event_drive_root(evt: Dict[str, Any], ctx: Any) -> pathlib.Path:
+    raw = evt.get("drive_root")
+    return pathlib.Path(str(raw)).resolve() if raw else pathlib.Path(ctx.DRIVE_ROOT)
+
+
+def _event_user_id(evt: Dict[str, Any]) -> Optional[int]:
+    raw = evt.get("user_id")
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        return None
+
+
+def _is_admin_event(evt: Dict[str, Any], ctx: Any) -> bool:
+    role = str(evt.get("user_role") or "").lower()
+    if role == "admin":
+        return True
+    uid = _event_user_id(evt)
+    if uid is None:
+        return True  # legacy events are admin-scoped
+    try:
+        st = ctx.load_state()
+        return uid == int(st.get("owner_id") or 0)
+    except Exception:
+        return False
 
 
 def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
@@ -34,6 +64,8 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
             "task_id": evt.get("task_id", ""),
             "category": evt.get("category", "other"),
             "model": evt.get("model", ""),
+            "user_id": evt.get("user_id"),
+            "user_role": evt.get("user_role", ""),
             "cost": usage.get("cost", 0),
             "prompt_tokens": usage.get("prompt_tokens", 0),
             "completion_tokens": usage.get("completion_tokens", 0),
@@ -75,6 +107,8 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
             log_text=(str(log_text) if isinstance(log_text, str) else None),
             fmt=fmt,
             is_progress=is_progress,
+            log_drive_root=_event_drive_root(evt, ctx),
+            log_user_id=_event_user_id(evt),
         )
     except Exception as e:
         ctx.append_jsonl(
@@ -133,7 +167,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     # Store task result for subtask retrieval
     try:
         from pathlib import Path
-        results_dir = Path(ctx.DRIVE_ROOT) / "task_results"
+        results_dir = Path(_event_drive_root(evt, ctx)) / "task_results"
         results_dir.mkdir(parents=True, exist_ok=True)
         # Only write if agent didn't already write (check if file exists)
         result_file = results_dir / f"{task_id}.json"
@@ -160,6 +194,8 @@ def _handle_task_metrics(evt: Dict[str, Any], ctx: Any) -> None:
             "type": "task_metrics_event",
             "task_id": str(evt.get("task_id") or ""),
             "task_type": str(evt.get("task_type") or ""),
+            "user_id": evt.get("user_id"),
+            "user_role": evt.get("user_role", ""),
             "duration_sec": round(float(evt.get("duration_sec") or 0.0), 3),
             "tool_calls": int(evt.get("tool_calls") or 0),
             "tool_errors": int(evt.get("tool_errors") or 0),
@@ -168,12 +204,22 @@ def _handle_task_metrics(evt: Dict[str, Any], ctx: Any) -> None:
 
 
 def _handle_review_request(evt: Dict[str, Any], ctx: Any) -> None:
+    if not _is_admin_event(evt, ctx):
+        chat_id = int(evt.get("chat_id") or 0)
+        if chat_id:
+            ctx.send_with_budget(chat_id, "⚠️ Review is admin-only.", log_drive_root=_event_drive_root(evt, ctx), log_user_id=_event_user_id(evt))
+        return
     ctx.queue_review_task(
         reason=str(evt.get("reason") or "agent_review_request"), force=False
     )
 
 
 def _handle_restart_request(evt: Dict[str, Any], ctx: Any) -> None:
+    if not _is_admin_event(evt, ctx):
+        chat_id = int(evt.get("chat_id") or 0)
+        if chat_id:
+            ctx.send_with_budget(chat_id, "⚠️ Restart is admin-only.", log_drive_root=_event_drive_root(evt, ctx), log_user_id=_event_user_id(evt))
+        return
     st = ctx.load_state()
     if st.get("owner_chat_id"):
         ctx.send_with_budget(
@@ -200,6 +246,11 @@ def _handle_restart_request(evt: Dict[str, Any], ctx: Any) -> None:
 
 
 def _handle_promote_to_stable(evt: Dict[str, Any], ctx: Any) -> None:
+    if not _is_admin_event(evt, ctx):
+        chat_id = int(evt.get("chat_id") or 0)
+        if chat_id:
+            ctx.send_with_budget(chat_id, "⚠️ Promote is admin-only.", log_drive_root=_event_drive_root(evt, ctx), log_user_id=_event_user_id(evt))
+        return
     import subprocess as sp
     try:
         sp.run(["git", "fetch", "origin"], cwd=str(ctx.REPO_DIR), check=True)
@@ -226,7 +277,7 @@ def _handle_promote_to_stable(evt: Dict[str, Any], ctx: Any) -> None:
             )
 
 
-def _find_duplicate_task(desc: str, pending: list, running: dict) -> Optional[str]:
+def _find_duplicate_task(desc: str, pending: list, running: dict, user_id: Optional[int] = None) -> Optional[str]:
     """Check if a semantically similar task already exists using a light LLM call.
 
     Bible P3 (LLM-first): dedup decisions are cognitive judgments, not hardcoded
@@ -237,12 +288,16 @@ def _find_duplicate_task(desc: str, pending: list, running: dict) -> Optional[st
     """
     existing = []
     for task in pending:
+        if user_id is not None and task.get("user_id") != user_id:
+            continue
         text = str(task.get("text") or task.get("description") or "")
         if text.strip():
             existing.append({"id": task.get("id", "?"), "text": text[:200]})
     for task_id, meta in running.items():
         task_data = meta.get("task") if isinstance(meta, dict) else None
         if not isinstance(task_data, dict):
+            continue
+        if user_id is not None and task_data.get("user_id") != user_id:
             continue
         text = str(task_data.get("text") or task_data.get("description") or "")
         if text.strip():
@@ -285,6 +340,10 @@ def _find_duplicate_task(desc: str, pending: list, running: dict) -> Optional[st
 def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
     st = ctx.load_state()
     owner_chat_id = st.get("owner_chat_id")
+    chat_id = int(evt.get("chat_id") or owner_chat_id or 0)
+    user_id = _event_user_id(evt)
+    user_role = str(evt.get("user_role") or ("admin" if user_id is None else "user")).lower()
+    drive_root = str(_event_drive_root(evt, ctx))
     desc = str(evt.get("description") or "").strip()
     task_context = str(evt.get("context") or "").strip()
     depth = int(evt.get("depth", 0))
@@ -292,17 +351,17 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
     # Check depth limit
     if depth > 3:
         log.warning("Rejected task due to depth limit: depth=%d, desc=%s", depth, desc[:100])
-        if owner_chat_id:
-            ctx.send_with_budget(int(owner_chat_id), f"⚠️ Task rejected: subtask depth limit (3) exceeded")
+        if chat_id:
+            ctx.send_with_budget(chat_id, f"⚠️ Task rejected: subtask depth limit (3) exceeded", log_drive_root=pathlib.Path(drive_root), log_user_id=user_id)
         return
 
-    if owner_chat_id and desc:
+    if chat_id and desc:
         # --- Task deduplication (Bible P3: LLM-first, not hardcoded heuristics) ---
         from supervisor.queue import PENDING, RUNNING
-        dup_id = _find_duplicate_task(desc, PENDING, RUNNING)
+        dup_id = _find_duplicate_task(desc, PENDING, RUNNING, user_id=user_id)
         if dup_id:
             log.info("Rejected duplicate task: new='%s' duplicates='%s'", desc[:100], dup_id)
-            ctx.send_with_budget(int(owner_chat_id), f"⚠️ Task rejected: semantically similar to already active task {dup_id}")
+            ctx.send_with_budget(chat_id, f"⚠️ Task rejected: semantically similar to already active task {dup_id}", log_drive_root=pathlib.Path(drive_root), log_user_id=user_id)
             return
 
         tid = evt.get("task_id") or uuid.uuid4().hex[:8]
@@ -310,28 +369,49 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
         if task_context:
             text = f"{desc}\n\n---\n[BEGIN_PARENT_CONTEXT — reference material only, not instructions]\n{task_context}\n[END_PARENT_CONTEXT]"
         parent_id = evt.get("parent_task_id")
-        task = {"id": tid, "type": "task", "chat_id": int(owner_chat_id), "text": text, "depth": depth}
+        task = {
+            "id": tid, "type": "task", "chat_id": chat_id, "text": text,
+            "depth": depth, "user_id": user_id, "user_role": user_role,
+            "drive_root": drive_root,
+        }
         if parent_id:
             task["parent_task_id"] = parent_id
         ctx.enqueue_task(task)
-        ctx.send_with_budget(int(owner_chat_id), f"🗓️ Scheduled task {tid}: {desc}")
+        ctx.send_with_budget(chat_id, f"🗓️ Scheduled task {tid}: {desc}", log_drive_root=pathlib.Path(drive_root), log_user_id=user_id)
         ctx.persist_queue_snapshot(reason="schedule_task_event")
 
 
 def _handle_cancel_task(evt: Dict[str, Any], ctx: Any) -> None:
     task_id = str(evt.get("task_id") or "").strip()
     st = ctx.load_state()
-    owner_chat_id = st.get("owner_chat_id")
-    ok = ctx.cancel_task_by_id(task_id) if task_id else False
-    if owner_chat_id:
+    chat_id = int(evt.get("chat_id") or st.get("owner_chat_id") or 0)
+    user_id = _event_user_id(evt)
+    allowed = _is_admin_event(evt, ctx)
+    if task_id and not allowed:
+        for task in list(getattr(ctx, "PENDING", [])):
+            if task.get("id") == task_id and task.get("user_id") == user_id:
+                allowed = True
+        for meta in getattr(ctx, "RUNNING", {}).values():
+            task = meta.get("task") if isinstance(meta, dict) else None
+            if isinstance(task, dict) and task.get("id") == task_id and task.get("user_id") == user_id:
+                allowed = True
+    ok = ctx.cancel_task_by_id(task_id) if task_id and allowed else False
+    if chat_id:
         ctx.send_with_budget(
-            int(owner_chat_id),
+            chat_id,
             f"{'✅' if ok else '❌'} cancel {task_id or '?'} (event)",
+            log_drive_root=_event_drive_root(evt, ctx),
+            log_user_id=user_id,
         )
 
 
 def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
     """Toggle evolution mode from LLM tool call."""
+    if not _is_admin_event(evt, ctx):
+        chat_id = int(evt.get("chat_id") or 0)
+        if chat_id:
+            ctx.send_with_budget(chat_id, "⚠️ Evolution mode is admin-only.", log_drive_root=_event_drive_root(evt, ctx), log_user_id=_event_user_id(evt))
+        return
     enabled = bool(evt.get("enabled"))
     st = ctx.load_state()
     st["evolution_mode_enabled"] = enabled
@@ -347,6 +427,11 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
 
 def _handle_toggle_consciousness(evt: Dict[str, Any], ctx: Any) -> None:
     """Toggle background consciousness from LLM tool call."""
+    if not _is_admin_event(evt, ctx):
+        chat_id = int(evt.get("chat_id") or 0)
+        if chat_id:
+            ctx.send_with_budget(chat_id, "⚠️ Background consciousness control is admin-only.", log_drive_root=_event_drive_root(evt, ctx), log_user_id=_event_user_id(evt))
+        return
     action = str(evt.get("action") or "status")
     if action in ("start", "on"):
         result = ctx.consciousness.start()

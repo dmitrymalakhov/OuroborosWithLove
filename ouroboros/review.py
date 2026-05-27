@@ -169,7 +169,7 @@ def collect_sections(
 
     _walk(repo_dir, "repo",
           {"__pycache__", ".git", ".pytest_cache", ".mypy_cache", "node_modules", ".venv"})
-    _walk(drive_root, "drive", {"archive", "locks", "downloads", "screenshots"})
+    _walk(drive_root, "drive", {"archive", "locks", "downloads", "screenshots", "users"})
 
     stats = {"files": len(sections), "chars": total_chars,
              "truncated": truncated, "dropped": dropped}

@@ -17,6 +17,16 @@ log = logging.getLogger(__name__)
 MAX_SUBTASK_DEPTH = 3
 
 
+def _scope(ctx: ToolContext) -> dict:
+    return {
+        "chat_id": ctx.current_chat_id,
+        "user_id": ctx.current_user_id,
+        "user_role": ctx.user_role,
+        "drive_root": str(ctx.drive_root),
+        "shared_drive_root": str(ctx.shared_drive_root or ctx.drive_root),
+    }
+
+
 def _request_restart(ctx: ToolContext, reason: str) -> str:
     if str(ctx.current_task_type or "") == "evolution" and not ctx.last_push_succeeded:
         return "⚠️ RESTART_BLOCKED: in evolution mode, commit+push first."
@@ -32,13 +42,13 @@ def _request_restart(ctx: ToolContext, reason: str) -> str:
     except Exception:
         log.debug("Failed to read VERSION file or git ref for restart verification", exc_info=True)
         pass
-    ctx.pending_events.append({"type": "restart_request", "reason": reason, "ts": utc_now_iso()})
+    ctx.pending_events.append({"type": "restart_request", "reason": reason, "ts": utc_now_iso(), **_scope(ctx)})
     ctx.last_push_succeeded = False
     return f"Restart requested: {reason}"
 
 
 def _promote_to_stable(ctx: ToolContext, reason: str) -> str:
-    ctx.pending_events.append({"type": "promote_to_stable", "reason": reason, "ts": utc_now_iso()})
+    ctx.pending_events.append({"type": "promote_to_stable", "reason": reason, "ts": utc_now_iso(), **_scope(ctx)})
     return f"Promote to stable requested: {reason}"
 
 
@@ -61,7 +71,7 @@ def _schedule_task(ctx: ToolContext, description: str, context: str = "", parent
             pass
 
     tid = uuid.uuid4().hex[:8]
-    evt = {"type": "schedule_task", "description": description, "task_id": tid, "depth": new_depth, "ts": utc_now_iso()}
+    evt = {"type": "schedule_task", "description": description, "task_id": tid, "depth": new_depth, "ts": utc_now_iso(), **_scope(ctx)}
     if context:
         evt["context"] = context
     if parent_task_id:
@@ -71,12 +81,12 @@ def _schedule_task(ctx: ToolContext, description: str, context: str = "", parent
 
 
 def _cancel_task(ctx: ToolContext, task_id: str) -> str:
-    ctx.pending_events.append({"type": "cancel_task", "task_id": task_id, "ts": utc_now_iso()})
+    ctx.pending_events.append({"type": "cancel_task", "task_id": task_id, "ts": utc_now_iso(), **_scope(ctx)})
     return f"Cancel requested: {task_id}"
 
 
 def _request_review(ctx: ToolContext, reason: str) -> str:
-    ctx.pending_events.append({"type": "review_request", "reason": reason, "ts": utc_now_iso()})
+    ctx.pending_events.append({"type": "review_request", "reason": reason, "ts": utc_now_iso(), **_scope(ctx)})
     return f"Review requested: {reason}"
 
 
@@ -119,6 +129,7 @@ def _send_owner_message(ctx: ToolContext, text: str, reason: str = "") -> str:
         "format": "markdown",
         "is_progress": False,
         "ts": utc_now_iso(),
+        **_scope(ctx),
     })
     append_jsonl(ctx.drive_logs() / "events.jsonl", {
         "ts": utc_now_iso(),
@@ -143,6 +154,7 @@ def _toggle_evolution(ctx: ToolContext, enabled: bool) -> str:
         "type": "toggle_evolution",
         "enabled": bool(enabled),
         "ts": utc_now_iso(),
+        **_scope(ctx),
     })
     state_str = "ON" if enabled else "OFF"
     return f"OK: evolution mode toggled {state_str}."
@@ -154,6 +166,7 @@ def _toggle_consciousness(ctx: ToolContext, action: str = "status") -> str:
         "type": "toggle_consciousness",
         "action": action,
         "ts": utc_now_iso(),
+        **_scope(ctx),
     })
     return f"OK: consciousness '{action}' requested."
 

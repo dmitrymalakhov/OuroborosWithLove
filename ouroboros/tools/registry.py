@@ -31,9 +31,12 @@ class ToolContext:
 
     repo_dir: pathlib.Path
     drive_root: pathlib.Path
+    shared_drive_root: Optional[pathlib.Path] = None
     branch_dev: str = "ouroboros"
     pending_events: List[Dict[str, Any]] = field(default_factory=list)
     current_chat_id: Optional[int] = None
+    current_user_id: Optional[int] = None
+    user_role: str = "admin"
     current_task_type: Optional[str] = None
     last_push_succeeded: bool = False
     emit_progress_fn: Callable[[str], None] = field(default=lambda _: None)
@@ -55,11 +58,20 @@ class ToolContext:
     # True when running inside handle_chat_direct (not a queued worker task)
     is_direct_chat: bool = False
 
+    def __post_init__(self) -> None:
+        if self.shared_drive_root is None:
+            self.shared_drive_root = self.drive_root
+        self.user_role = str(self.user_role or "user").lower()
+
     def repo_path(self, rel: str) -> pathlib.Path:
         return (self.repo_dir / safe_relpath(rel)).resolve()
 
     def drive_path(self, rel: str) -> pathlib.Path:
         return (self.drive_root / safe_relpath(rel)).resolve()
+
+    def shared_drive_path(self, rel: str) -> pathlib.Path:
+        root = self.shared_drive_root or self.drive_root
+        return (root / safe_relpath(rel)).resolve()
 
     def drive_logs(self) -> pathlib.Path:
         return (self.drive_root / "logs").resolve()
@@ -88,6 +100,23 @@ CORE_TOOL_NAMES = {
     "request_restart", "promote_to_stable",
     "knowledge_read", "knowledge_write",
     "browse_page", "browser_action", "analyze_screenshot",
+}
+
+
+ADMIN_ONLY_TOOL_NAMES = {
+    # Codebase, shell, git, and deployment surface.
+    "repo_read", "repo_list", "repo_write_commit", "repo_commit_push",
+    "codebase_digest", "codebase_health",
+    "run_shell", "claude_code_edit",
+    "git_status", "git_diff",
+    "request_restart", "promote_to_stable", "request_review",
+    "toggle_evolution", "toggle_consciousness",
+    "multi_model_review", "generate_evolution_stats",
+    # External project management surface.
+    "list_github_issues", "get_github_issue", "comment_on_issue",
+    "close_github_issue", "create_github_issue",
+    # Users share one budget; only admin can alter model/effort explicitly.
+    "switch_model",
 }
 
 
@@ -130,15 +159,26 @@ class ToolRegistry:
 
     # --- Contract ---
 
+    def _is_tool_allowed(self, name: str) -> bool:
+        if str(getattr(self._ctx, "user_role", "admin") or "user").lower() == "admin":
+            return True
+        return name not in ADMIN_ONLY_TOOL_NAMES
+
     def available_tools(self) -> List[str]:
-        return [e.name for e in self._entries.values()]
+        return [e.name for e in self._entries.values() if self._is_tool_allowed(e.name)]
 
     def schemas(self, core_only: bool = False) -> List[Dict[str, Any]]:
         if not core_only:
-            return [{"type": "function", "function": e.schema} for e in self._entries.values()]
+            return [
+                {"type": "function", "function": e.schema}
+                for e in self._entries.values()
+                if self._is_tool_allowed(e.name)
+            ]
         # Core tools + meta-tools for discovering/enabling extended tools
         result = []
         for e in self._entries.values():
+            if not self._is_tool_allowed(e.name):
+                continue
             if e.name in CORE_TOOL_NAMES or e.name in ("list_available_tools", "enable_tools"):
                 result.append({"type": "function", "function": e.schema})
         return result
@@ -147,6 +187,8 @@ class ToolRegistry:
         """Return name+description of all non-core tools."""
         result = []
         for e in self._entries.values():
+            if not self._is_tool_allowed(e.name):
+                continue
             if e.name not in CORE_TOOL_NAMES:
                 desc = e.schema.get("description", "No description")
                 result.append({"name": e.name, "description": desc})
@@ -155,7 +197,7 @@ class ToolRegistry:
     def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """Return the full schema for a specific tool."""
         entry = self._entries.get(name)
-        if entry:
+        if entry and self._is_tool_allowed(name):
             return {"type": "function", "function": entry.schema}
         return None
 
@@ -167,7 +209,9 @@ class ToolRegistry:
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         entry = self._entries.get(name)
         if entry is None:
-            return f"⚠️ Unknown tool: {name}. Available: {', '.join(sorted(self._entries.keys()))}"
+            return f"⚠️ Unknown tool: {name}. Available: {', '.join(sorted(self.available_tools()))}"
+        if not self._is_tool_allowed(name):
+            return f"⚠️ Tool '{name}' is admin-only in multi-user mode."
         try:
             return entry.handler(self._ctx, **args)
         except TypeError as e:

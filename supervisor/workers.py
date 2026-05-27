@@ -121,33 +121,60 @@ def get_running_task_ids() -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# Chat agent (direct mode)
+# Chat agents (direct mode)
 # ---------------------------------------------------------------------------
-_chat_agent = None
+_chat_agents: Dict[str, Any] = {}
+_chat_agents_lock = threading.Lock()
 
 
-def _get_chat_agent():
-    global _chat_agent
-    if _chat_agent is None:
-        sys.path.insert(0, str(REPO_DIR))
-        from ouroboros.agent import make_agent
-        _chat_agent = make_agent(
-            repo_dir=str(REPO_DIR),
-            drive_root=str(DRIVE_ROOT),
-            event_queue=get_event_q(),
-        )
-    return _chat_agent
+def _chat_agent_key(user_id: Optional[int], drive_root: pathlib.Path, user_role: str) -> str:
+    return f"{str(user_role or 'user').lower()}:{user_id or 0}:{str(drive_root)}"
 
 
-def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None) -> None:
+def _get_chat_agent(
+    user_id: Optional[int] = None,
+    drive_root: Optional[pathlib.Path] = None,
+    user_role: str = "admin",
+):
+    root = pathlib.Path(drive_root or DRIVE_ROOT)
+    role = str(user_role or "user").lower()
+    key = _chat_agent_key(user_id, root, role)
+    with _chat_agents_lock:
+        if key not in _chat_agents:
+            sys.path.insert(0, str(REPO_DIR))
+            from ouroboros.agent import make_agent
+            _chat_agents[key] = make_agent(
+                repo_dir=str(REPO_DIR),
+                drive_root=str(root),
+                event_queue=get_event_q(),
+                shared_drive_root=str(DRIVE_ROOT),
+                user_id=user_id,
+                user_role=role,
+            )
+        return _chat_agents[key]
+
+
+def handle_chat_direct(
+    chat_id: int,
+    text: str,
+    image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None,
+    user_id: Optional[int] = None,
+    user_role: str = "admin",
+    drive_root: Optional[Union[str, pathlib.Path]] = None,
+) -> None:
     try:
-        agent = _get_chat_agent()
+        effective_root = pathlib.Path(drive_root) if drive_root is not None else DRIVE_ROOT
+        role = str(user_role or "user").lower()
+        agent = _get_chat_agent(user_id=user_id, drive_root=effective_root, user_role=role)
         task = {
             "id": uuid.uuid4().hex[:8],
             "type": "task",
             "chat_id": chat_id,
             "text": text,
             "_is_direct_chat": True,
+            "user_id": user_id,
+            "user_role": role,
+            "drive_root": str(effective_root),
         }
         if image_data:
             # image_data is (base64, mime) or (base64, mime, caption)
@@ -245,7 +272,8 @@ def auto_resume_after_restart() -> None:
 
         # Auto-resume: inject synthetic message
         time.sleep(2)  # Let everything initialize
-        agent = _get_chat_agent()
+        user_id = int(st.get("owner_id") or 0) or None
+        agent = _get_chat_agent(user_id=user_id, drive_root=DRIVE_ROOT, user_role="admin")
         if not agent._busy:
             import threading
             threading.Thread(
@@ -253,6 +281,7 @@ def auto_resume_after_restart() -> None:
                 args=(int(chat_id),
                       "[auto-resume after restart] Continue your work. Read scratchpad and identity — they contain context of what you were doing.",
                       None),
+                kwargs={"user_id": user_id, "user_role": "admin", "drive_root": DRIVE_ROOT},
                 daemon=True,
             ).start()
             append_jsonl(
@@ -280,17 +309,32 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
     import pathlib as _pathlib
     _sys.path.insert(0, repo_dir)
     _drive = _pathlib.Path(drive_root)
-    try:
-        from ouroboros.agent import make_agent
-        agent = make_agent(repo_dir=repo_dir, drive_root=drive_root, event_queue=out_q)
-    except Exception as _e:
-        _log_worker_crash(wid, _drive, "make_agent", _e, _tb.format_exc())
-        return
+    agents: Dict[str, Any] = {}
+
+    def _agent_for_task(task: Dict[str, Any]):
+        effective_root = str(task.get("drive_root") or drive_root)
+        role = str(task.get("user_role") or "admin").lower()
+        raw_uid = task.get("user_id")
+        uid = int(raw_uid) if raw_uid is not None and str(raw_uid).strip() else None
+        key = f"{role}:{uid or 0}:{effective_root}"
+        if key not in agents:
+            from ouroboros.agent import make_agent
+            agents[key] = make_agent(
+                repo_dir=repo_dir,
+                drive_root=effective_root,
+                event_queue=out_q,
+                shared_drive_root=drive_root,
+                user_id=uid,
+                user_role=role,
+            )
+        return agents[key]
+
     while True:
         try:
             task = in_q.get()
             if task is None or task.get("type") == "shutdown":
                 break
+            agent = _agent_for_task(task)
             events = agent.handle_task(task)
             for e in events:
                 e2 = dict(e)
@@ -584,5 +628,3 @@ def ensure_workers_healthy() -> None:
         # Kill all workers — direct chat via handle_chat_direct still works
         kill_workers()
         CRASH_TS.clear()
-
-

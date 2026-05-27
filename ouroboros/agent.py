@@ -49,6 +49,7 @@ _worker_boot_lock = threading.Lock()
 class Env:
     repo_dir: pathlib.Path
     drive_root: pathlib.Path
+    shared_drive_root: Optional[pathlib.Path] = None
     branch_dev: str = "ouroboros"
 
     def repo_path(self, rel: str) -> pathlib.Path:
@@ -56,6 +57,10 @@ class Env:
 
     def drive_path(self, rel: str) -> pathlib.Path:
         return (self.drive_root / safe_relpath(rel)).resolve()
+
+    def shared_drive_path(self, rel: str) -> pathlib.Path:
+        root = self.shared_drive_root or self.drive_root
+        return (root / safe_relpath(rel)).resolve()
 
 
 # ---------------------------------------------------------------------------
@@ -65,16 +70,19 @@ class Env:
 class OuroborosAgent:
     """One agent instance per worker process. Mostly stateless; long-term state lives on Drive."""
 
-    def __init__(self, env: Env, event_queue: Any = None):
+    def __init__(self, env: Env, event_queue: Any = None, user_id: Optional[int] = None, user_role: str = "admin"):
         self.env = env
         self._pending_events: List[Dict[str, Any]] = []
         self._event_queue: Any = event_queue
         self._current_chat_id: Optional[int] = None
+        self._current_user_id: Optional[int] = user_id
+        self._user_role: str = str(user_role or "user").lower()
         self._current_task_type: Optional[str] = None
 
         # Message injection: owner can send messages while agent is busy
         self._incoming_messages: queue.Queue = queue.Queue()
         self._busy = False
+        self._dispatching = False
         self._last_progress_ts: float = 0.0
         self._task_started_ts: float = 0.0
 
@@ -100,9 +108,11 @@ class OuroborosAgent:
             append_jsonl(self.env.drive_path('logs') / 'events.jsonl', {
                 'ts': utc_now_iso(), 'type': 'worker_boot',
                 'pid': os.getpid(), 'git_branch': git_branch, 'git_sha': git_sha,
+                'user_role': self._user_role,
             })
-            self._verify_restart(git_sha)
-            self._verify_system_state(git_sha)
+            if self._user_role == "admin":
+                self._verify_restart(git_sha)
+                self._verify_system_state(git_sha)
         except Exception:
             log.warning("Worker boot logging failed", exc_info=True)
             return
@@ -252,7 +262,7 @@ class OuroborosAgent:
     def _check_budget(self) -> Tuple[dict, int]:
         """Check budget remaining with warning thresholds."""
         try:
-            state_path = self.env.drive_path("state") / "state.json"
+            state_path = self.env.shared_drive_path("state/state.json")
             state_data = json.loads(read_text(state_path))
             total_budget_str = os.environ.get("TOTAL_BUDGET", "")
 
@@ -337,9 +347,12 @@ class OuroborosAgent:
         ctx = ToolContext(
             repo_dir=self.env.repo_dir,
             drive_root=self.env.drive_root,
+            shared_drive_root=self.env.shared_drive_root or self.env.drive_root,
             branch_dev=self.env.branch_dev,
             pending_events=self._pending_events,
             current_chat_id=self._current_chat_id,
+            current_user_id=self._current_user_id,
+            user_role=self._user_role,
             current_task_type=self._current_task_type,
             emit_progress_fn=self._emit_progress,
             task_depth=int(task.get("depth", 0)),
@@ -371,7 +384,7 @@ class OuroborosAgent:
         # Read budget remaining for cost guard
         budget_remaining = None
         try:
-            state_path = self.env.drive_path("state") / "state.json"
+            state_path = self.env.shared_drive_path("state/state.json")
             state_data = json.loads(read_text(state_path))
             total_budget = float(os.environ.get("TOTAL_BUDGET", "1"))
             spent = float(state_data.get("spent_usd", 0))
@@ -390,6 +403,9 @@ class OuroborosAgent:
         self._last_progress_ts = start_time
         self._pending_events = []
         self._current_chat_id = int(task.get("chat_id") or 0) or None
+        _uid = task.get("user_id")
+        self._current_user_id = int(_uid) if _uid is not None and str(_uid).strip() else self._current_user_id
+        self._user_role = str(task.get("user_role") or self._user_role or "user").lower()
         self._current_task_type = str(task.get("type") or "")
 
         drive_logs = self.env.drive_path("logs")
@@ -425,6 +441,8 @@ class OuroborosAgent:
                     event_queue=self._event_queue,
                     initial_effort=initial_effort,
                     drive_root=self.env.drive_root,
+                    user_id=self._current_user_id,
+                    user_role=self._user_role,
                 )
             except Exception as e:
                 tb = traceback.format_exc()
@@ -465,6 +483,14 @@ class OuroborosAgent:
     # Task result emission
     # =====================================================================
 
+    def _event_scope(self) -> Dict[str, Any]:
+        return {
+            "user_id": self._current_user_id,
+            "user_role": self._user_role,
+            "drive_root": str(self.env.drive_root),
+            "shared_drive_root": str(self.env.shared_drive_root or self.env.drive_root),
+        }
+
     def _emit_task_results(
         self, task: Dict[str, Any], text: str,
         usage: Dict[str, Any], llm_trace: Dict[str, Any],
@@ -481,6 +507,7 @@ class OuroborosAgent:
             "text": text or "\u200b", "log_text": text or "",
             "format": "markdown",
             "task_id": task.get("id"), "ts": utc_now_iso(),
+            **self._event_scope(),
         })
 
         duration_sec = round(time.time() - start_time, 3)
@@ -510,6 +537,7 @@ class OuroborosAgent:
             "completion_tokens": int(usage.get("completion_tokens") or 0),
             "total_rounds": int(usage.get("rounds") or 0),
             "ts": utc_now_iso(),
+            **self._event_scope(),
         })
 
         self._pending_events.append({
@@ -521,6 +549,7 @@ class OuroborosAgent:
             "prompt_tokens": int(usage.get("prompt_tokens") or 0),
             "completion_tokens": int(usage.get("completion_tokens") or 0),
             "ts": utc_now_iso(),
+            **self._event_scope(),
         })
         append_jsonl(drive_logs / "events.jsonl", {
             "ts": utc_now_iso(),
@@ -602,6 +631,7 @@ class OuroborosAgent:
                 "type": "send_message", "chat_id": self._current_chat_id,
                 "text": f"💬 {text}", "format": "markdown", "is_progress": True,
                 "ts": utc_now_iso(),
+                **self._event_scope(),
             })
         except Exception:
             log.warning("Failed to emit progress event", exc_info=True)
@@ -650,6 +680,17 @@ class OuroborosAgent:
 # Factory
 # ---------------------------------------------------------------------------
 
-def make_agent(repo_dir: str, drive_root: str, event_queue: Any = None) -> OuroborosAgent:
-    env = Env(repo_dir=pathlib.Path(repo_dir), drive_root=pathlib.Path(drive_root))
-    return OuroborosAgent(env, event_queue=event_queue)
+def make_agent(
+    repo_dir: str,
+    drive_root: str,
+    event_queue: Any = None,
+    shared_drive_root: Optional[str] = None,
+    user_id: Optional[int] = None,
+    user_role: str = "admin",
+) -> OuroborosAgent:
+    env = Env(
+        repo_dir=pathlib.Path(repo_dir),
+        drive_root=pathlib.Path(drive_root),
+        shared_drive_root=pathlib.Path(shared_drive_root) if shared_drive_root else pathlib.Path(drive_root),
+    )
+    return OuroborosAgent(env, event_queue=event_queue, user_id=user_id, user_role=user_role)

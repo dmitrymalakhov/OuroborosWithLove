@@ -98,7 +98,7 @@ ouroboros/                          (agent core)
 | `OPENROUTER_API_KEY` | Yes, unless `OUROBOROS_LLM_PROVIDER=openai` | [openrouter.ai/keys](https://openrouter.ai/keys) -- Create an account, add credits, generate a key |
 | `TELEGRAM_BOT_TOKEN` | Yes | [@BotFather](https://t.me/BotFather) on Telegram (see Step 1) |
 | `TOTAL_BUDGET` | Yes | Your spending limit in USD (e.g. `50`) |
-| `GITHUB_TOKEN` | Yes | [github.com/settings/tokens](https://github.com/settings/tokens) -- Generate a classic token with `repo` scope |
+| `GITHUB_TOKEN` | Required unless `OUROBOROS_DISABLE_SELF_MODIFICATION=1` | [github.com/settings/tokens](https://github.com/settings/tokens) -- Generate a classic token with `repo` scope |
 | `OPENAI_API_KEY` | Required for `OUROBOROS_LLM_PROVIDER=openai`; otherwise optional | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) -- Enables direct OpenAI LLM calls and web search |
 | `ANTHROPIC_API_KEY` | No | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) -- Enables Claude Code CLI |
 
@@ -226,7 +226,7 @@ Full text: [BIBLE.md](BIBLE.md)
 | `OPENAI_API_KEY` | OpenAI API key when `OUROBOROS_LLM_PROVIDER=openai`; optional web search key otherwise |
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot API token |
 | `TOTAL_BUDGET` | Spending limit in USD |
-| `GITHUB_TOKEN` | GitHub personal access token with `repo` scope |
+| `GITHUB_TOKEN` | GitHub personal access token with `repo` scope. Required for self-modification; optional when `OUROBOROS_DISABLE_SELF_MODIFICATION=1` |
 
 ### Optional Secrets
 
@@ -241,6 +241,9 @@ Full text: [BIBLE.md](BIBLE.md)
 | `GITHUB_USER` | *(required in config cell)* | GitHub username |
 | `GITHUB_REPO` | `ouroboros` | GitHub repository name |
 | `OUROBOROS_ADMIN_USER_IDS` | *(empty)* | Comma-separated Telegram user IDs with admin privileges |
+| `OUROBOROS_DISABLE_SELF_MODIFICATION` | `0` | Disable repo write/push/restart/evolution tools and allow running without `GITHUB_TOKEN` |
+| `OUROBOROS_BRANCH_DEV` | `ouroboros`; `main` when self-modification is disabled | Runtime branch for development/self-modification |
+| `OUROBOROS_BRANCH_STABLE` | `ouroboros-stable`; `main` when self-modification is disabled | Stable branch used by promotion/restart flows |
 | `OUROBOROS_LLM_PROVIDER` | `openrouter` | Main-agent API provider: `openrouter` or direct `openai` |
 | `OUROBOROS_MODEL` | `anthropic/claude-sonnet-4.6` via OpenRouter; `gpt-5.2` via OpenAI | Primary LLM model |
 | `OUROBOROS_MODEL_CODE` | `anthropic/claude-sonnet-4.6` via OpenRouter; `gpt-5.2-codex` via OpenAI | Model available for code-heavy tasks |

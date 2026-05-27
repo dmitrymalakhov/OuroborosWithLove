@@ -8,6 +8,7 @@ ToolRegistry collects all tools, provides schemas() and execute().
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -104,6 +105,13 @@ CORE_TOOL_NAMES = {
 }
 
 
+SELF_MOD_DISABLED_TOOL_NAMES = {
+    "repo_write_commit", "repo_commit_push", "claude_code_edit",
+    "request_restart", "promote_to_stable", "toggle_evolution",
+    "multi_model_review", "generate_evolution_stats",
+}
+
+
 ADMIN_ONLY_TOOL_NAMES = {
     # Codebase, shell, git, and deployment surface.
     "repo_read", "repo_list", "repo_write_commit", "repo_commit_push",
@@ -161,6 +169,9 @@ class ToolRegistry:
     # --- Contract ---
 
     def _is_tool_allowed(self, name: str) -> bool:
+        if os.environ.get("OUROBOROS_DISABLE_SELF_MODIFICATION", "").strip().lower() in ("1", "true", "yes", "on"):
+            if name in SELF_MOD_DISABLED_TOOL_NAMES:
+                return False
         if str(getattr(self._ctx, "user_role", "admin") or "user").lower() == "admin":
             return True
         return name not in ADMIN_ONLY_TOOL_NAMES

@@ -96,11 +96,18 @@ def _parse_int_cfg(raw: Optional[str], default: int, minimum: int = 0) -> int:
         val = default
     return max(minimum, val)
 
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = get_cfg(name, default="1" if default else "0", allow_legacy_secret=True)
+    return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+DISABLE_SELF_MODIFICATION = _env_flag("OUROBOROS_DISABLE_SELF_MODIFICATION", default=False)
 LLM_PROVIDER = normalize_llm_provider(get_cfg("OUROBOROS_LLM_PROVIDER", default="openrouter", allow_legacy_secret=True))
 OPENROUTER_API_KEY = get_secret("OPENROUTER_API_KEY", required=(LLM_PROVIDER == "openrouter"))
 TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", required=True)
 TOTAL_BUDGET_DEFAULT = get_secret("TOTAL_BUDGET", required=True)
-GITHUB_TOKEN = get_secret("GITHUB_TOKEN", required=True)
+GITHUB_TOKEN = get_secret("GITHUB_TOKEN", default="", required=not DISABLE_SELF_MODIFICATION)
 
 # Robust TOTAL_BUDGET parsing — handles \r\n, spaces, and other junk from Colab Secrets
 # Example: user enters "8 800" → Colab stores as "8\r\n800" → we need 8800
@@ -239,9 +246,20 @@ if not CHAT_LOG_PATH.exists():
 # ----------------------------
 # 3) Git constants
 # ----------------------------
-BRANCH_DEV = "ouroboros"
-BRANCH_STABLE = "ouroboros-stable"
-REMOTE_URL = f"https://{GITHUB_TOKEN}:x-oauth-basic@github.com/{GITHUB_USER}/{GITHUB_REPO}.git"
+BRANCH_DEV = get_cfg(
+    "OUROBOROS_BRANCH_DEV",
+    default="main" if DISABLE_SELF_MODIFICATION else "ouroboros",
+    allow_legacy_secret=True,
+) or "main"
+BRANCH_STABLE = get_cfg(
+    "OUROBOROS_BRANCH_STABLE",
+    default="main" if DISABLE_SELF_MODIFICATION else "ouroboros-stable",
+    allow_legacy_secret=True,
+) or BRANCH_DEV
+if DISABLE_SELF_MODIFICATION and not str(GITHUB_TOKEN or "").strip():
+    REMOTE_URL = f"https://github.com/{GITHUB_USER}/{GITHUB_REPO}.git"
+else:
+    REMOTE_URL = f"https://{GITHUB_TOKEN}:x-oauth-basic@github.com/{GITHUB_USER}/{GITHUB_REPO}.git"
 
 # ----------------------------
 # 4) Initialize supervisor modules
@@ -309,8 +327,22 @@ from supervisor.events import dispatch_event
 # 5) Bootstrap repo
 # ----------------------------
 ensure_repo_present()
-ok, msg = safe_restart(reason="bootstrap", unsynced_policy="rescue_and_reset")
-assert ok, f"Bootstrap failed: {msg}"
+if DISABLE_SELF_MODIFICATION:
+    subprocess.run(["git", "checkout", BRANCH_DEV], cwd=str(REPO_DIR), check=False)
+    st_bootstrap = load_state()
+    st_bootstrap["current_branch"] = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(REPO_DIR),
+        capture_output=True, text=True, check=False,
+    ).stdout.strip() or BRANCH_DEV
+    st_bootstrap["current_sha"] = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(REPO_DIR),
+        capture_output=True, text=True, check=False,
+    ).stdout.strip()
+    save_state(st_bootstrap)
+    ok, msg = True, "OK: self-modification disabled"
+else:
+    ok, msg = safe_restart(reason="bootstrap", unsynced_policy="rescue_and_reset")
+    assert ok, f"Bootstrap failed: {msg}"
 
 # ----------------------------
 # 6) Start workers
@@ -334,6 +366,7 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
     "model_default": MODEL_MAIN, "model_code": MODEL_CODE, "model_light": MODEL_LIGHT,
     "soft_timeout_sec": SOFT_TIMEOUT_SEC, "hard_timeout_sec": HARD_TIMEOUT_SEC,
     "worker_start_method": str(os.environ.get("OUROBOROS_WORKER_START_METHOD") or ""),
+    "disable_self_modification": DISABLE_SELF_MODIFICATION,
     "diag_heartbeat_sec": DIAG_HEARTBEAT_SEC,
     "diag_slow_cycle_sec": DIAG_SLOW_CYCLE_SEC,
 })

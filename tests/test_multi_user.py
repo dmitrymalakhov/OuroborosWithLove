@@ -1,3 +1,4 @@
+import os
 import pathlib
 import sys
 import tempfile
@@ -84,6 +85,33 @@ class TestMultiUserTools(unittest.TestCase):
         self.assertIn("repo_write_commit", tools)
         self.assertIn("run_shell", tools)
         self.assertIn("request_restart", tools)
+
+    def test_self_mod_disabled_hides_self_mod_tools_even_for_admin(self):
+        from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+        old_value = os.environ.get("OUROBOROS_DISABLE_SELF_MODIFICATION")
+        os.environ["OUROBOROS_DISABLE_SELF_MODIFICATION"] = "1"
+        try:
+            registry = ToolRegistry(repo_dir=pathlib.Path("/tmp"), drive_root=pathlib.Path("/tmp"))
+            registry.set_context(ToolContext(
+                repo_dir=pathlib.Path("/tmp"),
+                drive_root=pathlib.Path("/tmp"),
+                current_user_id=1,
+                user_role="admin",
+            ))
+
+            tools = set(registry.available_tools())
+            self.assertNotIn("repo_write_commit", tools)
+            self.assertNotIn("repo_commit_push", tools)
+            self.assertNotIn("claude_code_edit", tools)
+            self.assertNotIn("request_restart", tools)
+            self.assertIn("run_shell", tools)
+            self.assertIn("analyze_document", tools)
+        finally:
+            if old_value is None:
+                os.environ.pop("OUROBOROS_DISABLE_SELF_MODIFICATION", None)
+            else:
+                os.environ["OUROBOROS_DISABLE_SELF_MODIFICATION"] = old_value
 
 
 class TestMultiUserEvents(unittest.TestCase):

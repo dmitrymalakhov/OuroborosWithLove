@@ -1,4 +1,6 @@
-# Ouroboros
+# OuroborosWithLove ❤️
+
+<img width="640" height="640" alt="telegram-peer-photo-size-2-5319159414205912523-1-0-0" src="https://github.com/user-attachments/assets/798f0245-0cc2-4127-b92e-092c1eb5ed6b" />
 
 > **New version available:** [Ouroboros Desktop](https://github.com/joi-lab/ouroboros-desktop) — native macOS app with web UI and local model support. This repo is the original Colab/Telegram version.
 

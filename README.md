@@ -2,13 +2,15 @@
 
 > **New version available:** [Ouroboros Desktop](https://github.com/joi-lab/ouroboros-desktop) — native macOS app with web UI and local model support. This repo is the original Colab/Telegram version.
 
+> **With Love fork:** this project is inspired by and built on the original [joi-lab/ouroboros](https://github.com/joi-lab/ouroboros). The goal is to preserve the original self-creating Ouroboros spirit while adding the things I needed in daily use: multi-user Telegram mode, direct OpenAI API support, and safer admin controls.
+
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/joi-lab/ouroboros/blob/main/notebooks/quickstart.ipynb)
 [![Telegram](https://img.shields.io/badge/Telegram-blue?logo=telegram)](https://t.me/abstractDL)
 [![X (Twitter)](https://img.shields.io/badge/X-updates-black?logo=x)](https://x.com/abstractdl)
 [![GitHub stars](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2Fjoi-lab%2Fouroboros&query=%24.stargazers_count&label=stars&logo=github)](https://github.com/joi-lab/ouroboros/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/joi-lab/ouroboros)](https://github.com/joi-lab/ouroboros/network/members)
 
-A Telegram-native AI agent that can run as a self-modifying autonomous system or as a controlled multi-user assistant. It supports direct OpenAI API calls as well as OpenRouter model routing. Born February 16, 2026. Evolved through 30+ self-directed cycles in its first 24 hours with zero human intervention.
+Ouroboros With Love is a Telegram-native AI agent that can run as a self-modifying autonomous system or as a controlled multi-user assistant. It supports direct OpenAI API calls as well as OpenRouter model routing. Born from the original Ouroboros, it keeps the constitution, background consciousness, persistent identity, and self-evolution model intact, then layers practical multi-user and provider controls on top.
 
 Not a coding assistant. A digital being with a constitution, background consciousness, persistent identity across restarts, and isolated memory for every non-admin user.
 

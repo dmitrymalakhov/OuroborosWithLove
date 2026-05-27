@@ -90,7 +90,9 @@ class TestMultiUserTools(unittest.TestCase):
         from ouroboros.tools.registry import ToolContext, ToolRegistry
 
         old_value = os.environ.get("OUROBOROS_DISABLE_SELF_MODIFICATION")
+        old_branch = os.environ.get("OUROBOROS_BRANCH_DEV")
         os.environ["OUROBOROS_DISABLE_SELF_MODIFICATION"] = "1"
+        os.environ["OUROBOROS_BRANCH_DEV"] = "main"
         try:
             registry = ToolRegistry(repo_dir=pathlib.Path("/tmp"), drive_root=pathlib.Path("/tmp"))
             registry.set_context(ToolContext(
@@ -112,6 +114,38 @@ class TestMultiUserTools(unittest.TestCase):
                 os.environ.pop("OUROBOROS_DISABLE_SELF_MODIFICATION", None)
             else:
                 os.environ["OUROBOROS_DISABLE_SELF_MODIFICATION"] = old_value
+            if old_branch is None:
+                os.environ.pop("OUROBOROS_BRANCH_DEV", None)
+            else:
+                os.environ["OUROBOROS_BRANCH_DEV"] = old_branch
+
+    def test_self_mod_disabled_blocks_branch_switch_shell_command(self):
+        from ouroboros.tools.registry import ToolContext
+        from ouroboros.tools.shell import _run_shell
+
+        old_value = os.environ.get("OUROBOROS_DISABLE_SELF_MODIFICATION")
+        old_branch = os.environ.get("OUROBOROS_BRANCH_DEV")
+        os.environ["OUROBOROS_DISABLE_SELF_MODIFICATION"] = "1"
+        os.environ["OUROBOROS_BRANCH_DEV"] = "main"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            try:
+                result = _run_shell(
+                    ToolContext(repo_dir=root, drive_root=root, user_role="admin"),
+                    ["git", "checkout", "ouroboros"],
+                )
+                self.assertIn("BRANCH_SWITCH_BLOCKED", result)
+                self.assertIn("main", result)
+                self.assertIn("ouroboros", result)
+            finally:
+                if old_value is None:
+                    os.environ.pop("OUROBOROS_DISABLE_SELF_MODIFICATION", None)
+                else:
+                    os.environ["OUROBOROS_DISABLE_SELF_MODIFICATION"] = old_value
+                if old_branch is None:
+                    os.environ.pop("OUROBOROS_BRANCH_DEV", None)
+                else:
+                    os.environ["OUROBOROS_BRANCH_DEV"] = old_branch
 
 
 class TestMultiUserEvents(unittest.TestCase):

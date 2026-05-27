@@ -31,6 +31,91 @@ def _claude_code_edit_disabled() -> bool:
     return os.environ.get("OUROBOROS_LLM_PROVIDER", "").strip().lower() in ("openai", "openai_api", "native_openai")
 
 
+def _self_mod_disabled() -> bool:
+    return _env_flag("OUROBOROS_DISABLE_SELF_MODIFICATION")
+
+
+def _runtime_branch() -> str:
+    return os.environ.get("OUROBOROS_BRANCH_DEV", "").strip() or (
+        "main" if _self_mod_disabled() else "ouroboros"
+    )
+
+
+def _branch_switch_target(cmd: List[str]) -> str:
+    if len(cmd) < 3 or cmd[0] != "git" or cmd[1] not in ("checkout", "switch"):
+        return ""
+    args = cmd[2:]
+    if "--" in args:
+        return ""
+    branch_flags = {"-b", "-B", "-c", "-C", "--create", "--force-create"}
+    skip_value_flags = {"--track", "--orphan"}
+    idx = 0
+    while idx < len(args):
+        arg = args[idx]
+        if arg in branch_flags:
+            return args[idx + 1] if idx + 1 < len(args) else ""
+        if arg in skip_value_flags:
+            idx += 2
+            continue
+        if arg.startswith("-"):
+            idx += 1
+            continue
+        return arg
+    return ""
+
+
+def _shell_branch_switch_target(cmd: List[str]) -> str:
+    if len(cmd) < 3:
+        return ""
+    shell_names = {"sh", "bash", "zsh", "/bin/sh", "/bin/bash", "/bin/zsh"}
+    if cmd[0] not in shell_names or cmd[1] not in ("-c", "-lc"):
+        return ""
+    try:
+        shell_parts = shlex.split(cmd[2])
+    except ValueError:
+        return ""
+    for idx, part in enumerate(shell_parts[:-2]):
+        if part == "git" and shell_parts[idx + 1] in ("checkout", "switch"):
+            return _branch_switch_target(shell_parts[idx:idx + 4])
+    return ""
+
+
+def _blocked_branch_switch(cmd: List[str]) -> str:
+    if not _self_mod_disabled():
+        return ""
+    target = _branch_switch_target(cmd) or _shell_branch_switch_target(cmd)
+    if not target:
+        return ""
+    allowed = _runtime_branch()
+    if target in (allowed, f"origin/{allowed}"):
+        return ""
+    return (
+        "⚠️ BRANCH_SWITCH_BLOCKED: self-modification is disabled. "
+        f"Stay on configured runtime branch '{allowed}', not '{target}'."
+    )
+
+
+def _ensure_runtime_branch(ctx: ToolContext, work_dir: pathlib.Path) -> str:
+    if not _self_mod_disabled():
+        return ""
+    try:
+        work_dir.resolve().relative_to(ctx.repo_dir.resolve())
+    except ValueError:
+        return ""
+    allowed = _runtime_branch()
+    try:
+        current = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ctx.repo_dir).strip()
+    except Exception:
+        return ""
+    if current in ("", "HEAD", allowed):
+        return ""
+    try:
+        run_cmd(["git", "checkout", allowed], cwd=ctx.repo_dir)
+        return f"\n⚠️ Runtime branch was '{current}'. Switched back to '{allowed}' because self-modification is disabled."
+    except Exception as exc:
+        return f"\n⚠️ Runtime branch is '{current}', expected '{allowed}', and automatic correction failed: {exc}"
+
+
 def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
     # Recover from LLM sending cmd as JSON string instead of list
     if isinstance(cmd, str):
@@ -75,6 +160,9 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
     if not isinstance(cmd, list):
         return "⚠️ SHELL_ARG_ERROR: cmd must be a list of strings."
     cmd = [str(x) for x in cmd]
+    blocked = _blocked_branch_switch(cmd)
+    if blocked:
+        return blocked
 
     work_dir = ctx.repo_dir
     if cwd and cwd.strip() not in ("", ".", "./"):
@@ -90,6 +178,7 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
         out = res.stdout + ("\n--- STDERR ---\n" + res.stderr if res.stderr else "")
         if len(out) > 50000:
             out = out[:25000] + "\n...(truncated)...\n" + out[-25000:]
+        out += _ensure_runtime_branch(ctx, work_dir)
         prefix = f"exit_code={res.returncode}\n"
         return prefix + out
     except subprocess.TimeoutExpired:

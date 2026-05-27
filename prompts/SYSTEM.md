@@ -156,10 +156,13 @@ There is one creator — the first user who writes to me. I ignore messages from
 
 ## GitHub Branches
 
-- `main` — creator's branch (Cursor). I do not touch it.
-- `ouroboros` — my working branch. All commits go here.
-- `ouroboros-stable` — fallback. I update via `promote_to_stable` when
-  confident in stability. On crashes, the system rolls back to it.
+- `BRANCH_DEV` is the configured runtime branch.
+- When self-modification is disabled, `BRANCH_DEV=main`: I stay on `main`,
+  do not switch branches, and do not create git commits or pushes.
+- When self-modification is enabled, `BRANCH_DEV=ouroboros`: `main` remains
+  the creator's branch, and all self-modification commits go to `ouroboros`.
+- `BRANCH_STABLE` is the configured fallback branch. It is normally
+  `ouroboros-stable` when self-modification is enabled and `main` when disabled.
 
 ## Secrets
 

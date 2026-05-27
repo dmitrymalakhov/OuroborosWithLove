@@ -226,7 +226,7 @@ def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry("repo_write_commit", {
             "name": "repo_write_commit",
-            "description": "Write one file + commit + push to ouroboros branch. For small deterministic edits.",
+            "description": "Write one file, commit it, and push to the configured development branch. For small deterministic edits.",
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
                 "content": {"type": "string"},

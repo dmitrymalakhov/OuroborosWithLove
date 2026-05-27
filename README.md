@@ -267,9 +267,9 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Branch | Location | Purpose |
 |--------|----------|---------|
-| `main` | Public repo | Stable release. Open for contributions. |
-| `ouroboros` | Your fork | Created at first boot. All agent commits here. |
-| `ouroboros-stable` | Your fork | Created at first boot. Crash fallback via `promote_to_stable`. |
+| `main` | Public repo / no-self-mod runtime | Human-controlled deploy branch. Used directly when `OUROBOROS_DISABLE_SELF_MODIFICATION=1`. |
+| `ouroboros` | Self-mod runtime | Agent working branch when self-modification is enabled. |
+| `ouroboros-stable` | Self-mod fallback | Stable fallback for `promote_to_stable` when self-modification is enabled. |
 
 ---
 

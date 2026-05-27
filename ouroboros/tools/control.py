@@ -228,7 +228,7 @@ def get_tools() -> List[ToolEntry]:
         }, _request_restart),
         ToolEntry("promote_to_stable", {
             "name": "promote_to_stable",
-            "description": "Promote ouroboros -> ouroboros-stable. Call when you consider the code stable.",
+            "description": "Promote the configured development branch to the configured stable branch. Call when you consider the code stable.",
             "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}, "required": ["reason"]},
         }, _promote_to_stable),
         ToolEntry("schedule_task", {

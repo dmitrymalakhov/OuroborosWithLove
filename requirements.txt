@@ -1,5 +1,7 @@
 
 openai>=1.0.0
+pypdf>=4.0.0
+httpx
 requests
 playwright
 playwright-stealth

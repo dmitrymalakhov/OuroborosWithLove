@@ -42,6 +42,7 @@ TOOL_MODULES = [
     "ouroboros.tools.search",
     "ouroboros.tools.control",
     "ouroboros.tools.browser",
+    "ouroboros.tools.documents",
     "ouroboros.tools.review",
 ]
 
@@ -90,6 +91,7 @@ EXPECTED_TOOLS = [
     "git_status", "git_diff",
     "run_shell", "claude_code_edit",
     "browse_page", "browser_action",
+    "analyze_document",
     "web_search",
     "chat_history", "update_scratchpad", "update_identity",
     "request_restart", "promote_to_stable", "request_review",

@@ -27,6 +27,7 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 - **Self-Modification** -- Reads and rewrites its own source code through git. Every change is a commit to itself.
 - **Multi-User Telegram Mode** -- Admins keep full control while regular users get isolated memory, logs, and task context.
 - **OpenAI or OpenRouter** -- Run directly on OpenAI models or route across providers through OpenRouter.
+- **Document Analysis** -- Extracts PDF, PPTX, DOCX, and text-like files from a user's workspace for summaries, critique, Q&A, and task extraction.
 - **Constitution** -- Governed by [BIBLE.md](BIBLE.md) (9 philosophical principles). Philosophy first, code second.
 - **Background Consciousness** -- Thinks between tasks. Has an inner life. Not reactive -- proactive.
 - **Identity Persistence** -- One continuous being across restarts. Remembers who it is, what it has done, and what it is becoming.
@@ -75,6 +76,7 @@ ouroboros/                          (agent core)
       git.py                        -- optional repo write/commit/push tools
       shell.py                      -- shell and optional Claude Code CLI
       search.py                     -- OpenAI Responses web search
+      documents.py                  -- PDF/PPTX/DOCX/text extraction for analysis
       browser.py                    -- Playwright browser automation
       control.py                    -- restart, background, evolution controls
       review.py                     -- multi-model review via OpenRouter

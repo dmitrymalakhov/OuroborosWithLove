@@ -67,6 +67,7 @@ class TestMultiUserTools(unittest.TestCase):
         self.assertNotIn("request_restart", tools)
         self.assertIn("update_scratchpad", tools)
         self.assertIn("chat_history", tools)
+        self.assertIn("analyze_document", tools)
 
     def test_admin_role_can_see_admin_tools(self):
         from ouroboros.tools.registry import ToolContext, ToolRegistry

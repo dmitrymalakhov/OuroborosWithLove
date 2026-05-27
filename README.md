@@ -25,7 +25,7 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 - **Self-Modification** -- Reads and rewrites its own source code through git. Every change is a commit to itself.
 - **Multi-User Telegram Mode** -- Admins keep full control while regular users get isolated memory, logs, and task context.
 - **OpenAI or OpenRouter** -- Run directly on OpenAI models or route across providers through OpenRouter.
-- **Document Analysis** -- Extracts PDF, PPTX, DOCX, and text-like files from a user's workspace for summaries, critique, Q&A, and task extraction.
+- **Document Analysis** -- Saves Telegram document uploads and extracts PDF, PPTX, DOCX, and text-like files for summaries, critique, Q&A, and task extraction.
 - **Constitution** -- Governed by [BIBLE.md](BIBLE.md) (9 philosophical principles). Philosophy first, code second.
 - **Background Consciousness** -- Thinks between tasks. Has an inner life. Not reactive -- proactive.
 - **Identity Persistence** -- One continuous being across restarts. Remembers who it is, what it has done, and what it is becoming.
@@ -45,7 +45,7 @@ colab_launcher.py / server runtime
     |
     v
 supervisor/                         (runtime orchestration)
-  telegram.py                       -- Telegram polling, replies, budget display
+  telegram.py                       -- Telegram polling, replies, uploads, budget display
   users.py                          -- admin/user registry and isolated workspaces
   state.py                          -- global state, budget tracking, persistence
   queue.py                          -- task queue, scheduling, snapshots
@@ -155,6 +155,8 @@ Open your Telegram bot and send any message. If `OUROBOROS_ADMIN_USER_IDS` is em
 
 Other Telegram users can still talk to the bot. They run in **multi-user mode**: each user gets a separate memory/log workspace under `users/<telegram_user_id>/`, while admin-only tools such as shell, git, evolution, restart, and model switching remain restricted.
 
+You can also send documents directly in Telegram. PDF, PPTX, DOCX, and text-like files are saved into the sender's workspace under `uploads/YYYY-MM-DD/` and become available to `analyze_document`.
+
 **Restarting:** If Colab disconnects or you restart the runtime, just re-run the same cell. Your Ouroboros's evolution is preserved -- all changes are pushed to your fork, and agent state lives on Google Drive.
 
 ---
@@ -177,12 +179,40 @@ All other messages are sent directly to the LLM (Principle 3: LLM-First).
 
 ---
 
+## Tool Capabilities
+
+Ouroboros exposes its abilities through an auto-discovered tool registry. The LLM sees a compact core toolset first and can enable additional tools when a task needs them.
+
+| Area | Tools / runtime path | What they enable |
+|------|----------------------|------------------|
+| Files and workspace | `drive_read`, `drive_list`, `drive_write`, `repo_read`, `repo_list` | Read and write user workspace files; inspect the repository when allowed. |
+| Document analysis | `analyze_document` | Extract PDF, PPTX, DOCX, TXT, Markdown, CSV, JSON, HTML, XML, and code-like files for summaries, critique, Q&A, and action item extraction. |
+| Telegram uploads | runtime upload pipeline + `analyze_document` | Telegram document attachments are stored in `uploads/YYYY-MM-DD/` inside the sender's workspace, then passed to the agent as a readable path. |
+| Web and browser | `web_search`, `browse_page`, `browser_action` | Search the web, open pages, extract text/HTML/Markdown, click/fill/select, scroll, evaluate JavaScript, and take screenshots. |
+| Vision | `analyze_screenshot`, `vlm_query`, `send_photo` | Analyze screenshots or provided images and send generated/collected images back to Telegram. |
+| Memory and knowledge | `chat_history`, `update_scratchpad`, `update_identity`, `knowledge_read`, `knowledge_write`, `knowledge_list`, `summarize_dialogue` | Maintain persistent memory, structured knowledge topics, and dialogue summaries. |
+| Task orchestration | `schedule_task`, `wait_for_task`, `get_task_result`, `cancel_task`, `forward_to_worker` | Decompose complex work into background tasks and route follow-up messages to the right worker. |
+| Context management | `compact_context`, `list_available_tools`, `enable_tools` | Keep long conversations manageable and dynamically expose non-core tools only when needed. |
+| Health and review | `codebase_health`, `multi_model_review`, `request_review` | Inspect code health and ask other models to review important changes. |
+| Git and self-modification | `repo_write_commit`, `repo_commit_push`, `git_status`, `git_diff`, `request_restart`, `promote_to_stable`, `toggle_evolution`, `generate_evolution_stats` | Let Ouroboros modify itself, commit, push, restart, promote stable branches, and generate evolution metrics when self-modification is enabled. |
+| Shell and code editing | `run_shell`, `claude_code_edit` | Run controlled shell commands and optionally delegate code edits to Claude Code CLI. |
+| GitHub issues | `list_github_issues`, `get_github_issue`, `comment_on_issue`, `close_github_issue`, `create_github_issue` | Work with GitHub issue tracking from inside the agent. |
+
+Access is role-aware:
+
+- Regular users keep document, workspace, browser, memory, knowledge, and task tools inside their isolated workspace.
+- Admins can use operational tools such as shell, git, restart, model switching, GitHub issues, review, and evolution.
+- When `OUROBOROS_DISABLE_SELF_MODIFICATION=1`, self-modification tools are hidden even for admins, `GITHUB_TOKEN` is optional, and the runtime stays on `main`.
+- When self-modification is enabled, the agent works on `OUROBOROS_BRANCH_DEV` (normally `ouroboros`) and uses `OUROBOROS_BRANCH_STABLE` (normally `ouroboros-stable`) as fallback.
+
+---
+
 ## Multi-User Mode
 
 Ouroboros can serve multiple Telegram users from one bot and one runtime.
 
 - Admin users are defined by `OUROBOROS_ADMIN_USER_IDS` or, if unset, by the first Telegram user who contacts the bot.
-- Regular users get isolated memory, chat history, logs, task results, and scratchpads.
+- Regular users get isolated memory, chat history, logs, uploads, task results, and scratchpads.
 - Admin-only capabilities stay protected: git operations, shell access, model switching, evolution mode, restart, and review controls.
 - Budget tracking is global, but non-admin budget output is redacted to avoid exposing private spend details.
 

@@ -204,7 +204,7 @@ Full list is in tool schemas on every call. Key tools:
 
 **Read:** `repo_read`, `repo_list`, `drive_read`, `drive_list`, `codebase_digest`
 **Write:** `repo_write_commit`, `repo_commit_push`, `drive_write`
-**Code:** `claude_code_edit` (primary path) -> then `repo_commit_push`
+**Code:** `claude_code_edit` when present, otherwise `repo_write_commit` -> then `repo_commit_push`
 **Git:** `git_status`, `git_diff`
 **GitHub:** `list_github_issues`, `get_github_issue`, `comment_on_issue`, `close_github_issue`, `create_github_issue`
 **Shell:** `run_shell` (cmd as array of strings)
@@ -220,9 +220,9 @@ The registry discovers them automatically.
 
 ### Code Editing Strategy
 
-1. Claude Code CLI -> `claude_code_edit` -> `repo_commit_push`.
-2. Small edits -> `repo_write_commit`.
-3. `claude_code_edit` failed twice -> manual edits.
+1. If `claude_code_edit` is present in tool schemas: Claude Code CLI -> `claude_code_edit` -> `repo_commit_push`.
+2. If `claude_code_edit` is absent or disabled: use `repo_write_commit`.
+3. Small edits -> `repo_write_commit`.
 4. `request_restart` — ONLY after a successful push.
 
 ### Task Decomposition

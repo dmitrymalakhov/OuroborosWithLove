@@ -1,7 +1,7 @@
 """
 Ouroboros — LLM client.
 
-The only module that communicates with the LLM API (OpenRouter).
+The only module that communicates with the main LLM API.
 Contract: chat(), default_model(), available_models(), add_usage().
 """
 
@@ -14,7 +14,44 @@ from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.6"
+DEFAULT_OPENAI_MODEL = "gpt-5.2"
+DEFAULT_OPENAI_CODE_MODEL = "gpt-5.2-codex"
 DEFAULT_LIGHT_MODEL = "google/gemini-3-pro-preview"
+DEFAULT_OPENAI_LIGHT_MODEL = "gpt-4.1"
+
+
+def normalize_llm_provider(value: Optional[str] = None) -> str:
+    """Normalize LLM provider config to a supported provider id."""
+    raw = str(value if value is not None else os.environ.get("OUROBOROS_LLM_PROVIDER", "openrouter"))
+    provider = raw.strip().lower().replace("-", "_")
+    if provider in ("openai", "openai_api", "native_openai"):
+        return "openai"
+    return "openrouter"
+
+
+def default_main_model(provider: Optional[str] = None) -> str:
+    """Return provider-aware default model."""
+    return DEFAULT_OPENAI_MODEL if normalize_llm_provider(provider) == "openai" else DEFAULT_OPENROUTER_MODEL
+
+
+def default_code_model(provider: Optional[str] = None) -> str:
+    """Return provider-aware default code-capable model."""
+    return DEFAULT_OPENAI_CODE_MODEL if normalize_llm_provider(provider) == "openai" else DEFAULT_OPENROUTER_MODEL
+
+
+def default_light_model(provider: Optional[str] = None) -> str:
+    """Return provider-aware default lightweight model."""
+    return DEFAULT_OPENAI_LIGHT_MODEL if normalize_llm_provider(provider) == "openai" else DEFAULT_LIGHT_MODEL
+
+
+def default_fallback_models(provider: Optional[str] = None) -> str:
+    """Return provider-aware fallback chain as a comma-separated config string."""
+    if normalize_llm_provider(provider) == "openai":
+        return "gpt-5.2,gpt-4.1"
+    return "google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6"
 
 
 def normalize_reasoning_effort(value: str, default: str = "medium") -> str:
@@ -103,32 +140,70 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, float, float]]:
 
 
 class LLMClient:
-    """OpenRouter API wrapper. All LLM calls go through this class."""
+    """Provider-aware OpenAI SDK wrapper. All main LLM calls go through this class."""
 
     def __init__(
         self,
         api_key: Optional[str] = None,
-        base_url: str = "https://openrouter.ai/api/v1",
+        base_url: Optional[str] = None,
+        provider: Optional[str] = None,
     ):
-        self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
-        self._base_url = base_url
+        self._provider = normalize_llm_provider(provider)
+        if self._provider == "openai":
+            self._api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+            self._base_url = base_url or os.environ.get("OUROBOROS_LLM_BASE_URL", "") or OPENAI_BASE_URL
+        else:
+            self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
+            self._base_url = base_url or os.environ.get("OUROBOROS_LLM_BASE_URL", "") or OPENROUTER_BASE_URL
         self._client = None
+
+    @property
+    def provider(self) -> str:
+        return self._provider
+
+    def supports_model(self, model: str) -> bool:
+        """Return whether this provider can call the configured model id."""
+        model = str(model or "").strip()
+        if not model:
+            return False
+        if self._provider == "openai":
+            return "/" not in model or model.startswith("openai/")
+        return True
+
+    def _api_model(self, model: str) -> str:
+        model = str(model or "").strip()
+        if self._provider == "openai":
+            if model.startswith("openai/"):
+                return model.split("/", 1)[1]
+            if "/" in model:
+                raise ValueError(
+                    "OUROBOROS_LLM_PROVIDER=openai only supports OpenAI model ids; "
+                    f"got {model!r}. Use a native id like 'gpt-5.2' or 'openai/gpt-5.2'."
+                )
+        return model
+
+    def _supports_openai_reasoning_effort(self, model: str) -> bool:
+        api_model = self._api_model(model).lower()
+        return api_model.startswith("o") or api_model.startswith("gpt-5")
 
     def _get_client(self):
         if self._client is None:
             from openai import OpenAI
-            self._client = OpenAI(
-                base_url=self._base_url,
-                api_key=self._api_key,
-                default_headers={
+            kwargs: Dict[str, Any] = {"api_key": self._api_key}
+            if self._base_url:
+                kwargs["base_url"] = self._base_url
+            if self._provider == "openrouter":
+                kwargs["default_headers"] = {
                     "HTTP-Referer": "https://colab.research.google.com/",
                     "X-Title": "Ouroboros",
-                },
-            )
+                }
+            self._client = OpenAI(**kwargs)
         return self._client
 
     def _fetch_generation_cost(self, generation_id: str) -> Optional[float]:
         """Fetch cost from OpenRouter Generation API as fallback."""
+        if self._provider != "openrouter":
+            return None
         try:
             import requests
             url = f"{self._base_url.rstrip('/')}/generation?id={generation_id}"
@@ -163,30 +238,40 @@ class LLMClient:
         """Single LLM call. Returns: (response_message_dict, usage_dict with cost)."""
         client = self._get_client()
         effort = normalize_reasoning_effort(reasoning_effort)
+        api_model = self._api_model(model)
 
-        extra_body: Dict[str, Any] = {
-            "reasoning": {"effort": effort, "exclude": True},
-        }
-
-        # Pin Anthropic models to Anthropic provider for prompt caching
-        if model.startswith("anthropic/"):
-            extra_body["provider"] = {
-                "order": ["Anthropic"],
-                "allow_fallbacks": False,
-                "require_parameters": True,
+        if self._provider == "openai":
+            kwargs: Dict[str, Any] = {
+                "model": api_model,
+                "messages": messages,
+                "max_completion_tokens": max_tokens,
+            }
+            if self._supports_openai_reasoning_effort(model):
+                kwargs["reasoning_effort"] = effort
+        else:
+            extra_body: Dict[str, Any] = {
+                "reasoning": {"effort": effort, "exclude": True},
             }
 
-        kwargs: Dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "extra_body": extra_body,
-        }
+            # Pin Anthropic models to Anthropic provider for prompt caching
+            if model.startswith("anthropic/"):
+                extra_body["provider"] = {
+                    "order": ["Anthropic"],
+                    "allow_fallbacks": False,
+                    "require_parameters": True,
+                }
+
+            kwargs = {
+                "model": api_model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "extra_body": extra_body,
+            }
         if tools:
-            # Add cache_control to last tool for Anthropic prompt caching
-            # This caches all tool schemas (they never change between calls)
             tools_with_cache = [t for t in tools]  # shallow copy
-            if tools_with_cache:
+            if self._provider == "openrouter" and tools_with_cache:
+                # Add cache_control to last tool for Anthropic prompt caching.
+                # This caches all tool schemas (they never change between calls).
                 last_tool = {**tools_with_cache[-1]}  # copy last tool
                 last_tool["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
                 tools_with_cache[-1] = last_tool
@@ -280,16 +365,22 @@ class LLMClient:
 
     def default_model(self) -> str:
         """Return the single default model from env. LLM switches via tool if needed."""
-        return os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
+        return os.environ.get("OUROBOROS_MODEL", "").strip() or default_main_model(self._provider)
 
     def available_models(self) -> List[str]:
         """Return list of available models from env (for switch_model tool schema)."""
-        main = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
+        main = os.environ.get("OUROBOROS_MODEL", "").strip() or default_main_model(self._provider)
         code = os.environ.get("OUROBOROS_MODEL_CODE", "")
         light = os.environ.get("OUROBOROS_MODEL_LIGHT", "")
-        models = [main]
-        if code and code != main:
-            models.append(code)
-        if light and light != main and light != code:
-            models.append(light)
+        models = []
+        seen_api_models = set()
+        for candidate in (main, code, light):
+            candidate = str(candidate or "").strip()
+            if not candidate or not self.supports_model(candidate):
+                continue
+            api_model = self._api_model(candidate)
+            if api_model in seen_api_models:
+                continue
+            seen_api_models.add(api_model)
+            models.append(candidate)
         return models

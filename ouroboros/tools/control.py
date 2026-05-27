@@ -307,7 +307,7 @@ def get_tools() -> List[ToolEntry]:
                            "Use when you need more power (complex code, deep reasoning) "
                            "or want to save budget (simple tasks). Takes effect on next round.",
             "parameters": {"type": "object", "properties": {
-                "model": {"type": "string", "description": "Model name (e.g. anthropic/claude-sonnet-4). Leave empty to keep current."},
+                "model": {"type": "string", "description": "Model name (e.g. anthropic/claude-sonnet-4 or gpt-5.2). Leave empty to keep current."},
                 "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh"],
                            "description": "Reasoning effort level. Leave empty to keep current."},
             }, "required": []},

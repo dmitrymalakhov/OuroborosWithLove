@@ -44,7 +44,13 @@ def ensure_claude_code_cli() -> bool:
 # 0.1) provide apply_patch shim
 # ----------------------------
 from ouroboros.apply_patch import install as install_apply_patch
-from ouroboros.llm import DEFAULT_LIGHT_MODEL
+from ouroboros.llm import (
+    default_code_model,
+    default_fallback_models,
+    default_light_model,
+    default_main_model,
+    normalize_llm_provider,
+)
 install_apply_patch()
 
 # ----------------------------
@@ -90,7 +96,8 @@ def _parse_int_cfg(raw: Optional[str], default: int, minimum: int = 0) -> int:
         val = default
     return max(minimum, val)
 
-OPENROUTER_API_KEY = get_secret("OPENROUTER_API_KEY", required=True)
+LLM_PROVIDER = normalize_llm_provider(get_cfg("OUROBOROS_LLM_PROVIDER", default="openrouter", allow_legacy_secret=True))
+OPENROUTER_API_KEY = get_secret("OPENROUTER_API_KEY", required=(LLM_PROVIDER == "openrouter"))
 TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", required=True)
 TOTAL_BUDGET_DEFAULT = get_secret("TOTAL_BUDGET", required=True)
 GITHUB_TOKEN = get_secret("GITHUB_TOKEN", required=True)
@@ -108,16 +115,37 @@ except Exception as e:
     log.warning(f"Failed to parse TOTAL_BUDGET ({TOTAL_BUDGET_DEFAULT!r}): {e}")
     TOTAL_BUDGET_LIMIT = 0.0
 
-OPENAI_API_KEY = get_secret("OPENAI_API_KEY", default="")
+OPENAI_API_KEY = get_secret("OPENAI_API_KEY", default="", required=(LLM_PROVIDER == "openai"))
 ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY", default="")
 GITHUB_USER = get_cfg("GITHUB_USER", default=None, allow_legacy_secret=True)
 GITHUB_REPO = get_cfg("GITHUB_REPO", default=None, allow_legacy_secret=True)
 assert GITHUB_USER and str(GITHUB_USER).strip(), "GITHUB_USER not set. Add it to your config cell (see README)."
 assert GITHUB_REPO and str(GITHUB_REPO).strip(), "GITHUB_REPO not set. Add it to your config cell (see README)."
 MAX_WORKERS = int(get_cfg("OUROBOROS_MAX_WORKERS", default="5", allow_legacy_secret=True) or "5")
-MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default="anthropic/claude-sonnet-4.6", allow_legacy_secret=True)
-MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default="anthropic/claude-sonnet-4.6", allow_legacy_secret=True)
-MODEL_LIGHT = get_cfg("OUROBOROS_MODEL_LIGHT", default=DEFAULT_LIGHT_MODEL, allow_legacy_secret=True)
+MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default=default_main_model(LLM_PROVIDER), allow_legacy_secret=True)
+MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default=default_code_model(LLM_PROVIDER), allow_legacy_secret=True)
+MODEL_LIGHT = get_cfg("OUROBOROS_MODEL_LIGHT", default=default_light_model(LLM_PROVIDER), allow_legacy_secret=True)
+MODEL_FALLBACK_LIST = get_cfg(
+    "OUROBOROS_MODEL_FALLBACK_LIST",
+    default=default_fallback_models(LLM_PROVIDER),
+    allow_legacy_secret=True,
+)
+DISABLE_CLAUDE_CODE_EDIT = get_cfg(
+    "OUROBOROS_DISABLE_CLAUDE_CODE_EDIT",
+    default="1" if LLM_PROVIDER == "openai" else "0",
+    allow_legacy_secret=True,
+)
+if LLM_PROVIDER == "openai":
+    for _name, _model in (
+        ("OUROBOROS_MODEL", MODEL_MAIN),
+        ("OUROBOROS_MODEL_CODE", MODEL_CODE),
+        ("OUROBOROS_MODEL_LIGHT", MODEL_LIGHT),
+    ):
+        _model_str = str(_model or "").strip()
+        assert "/" not in _model_str or _model_str.startswith("openai/"), (
+            f"{_name}={_model_str!r} is not compatible with OUROBOROS_LLM_PROVIDER=openai. "
+            "Use a native OpenAI model id such as 'gpt-5.2' or an openai/... id."
+        )
 ADMIN_USER_IDS_RAW = get_cfg("OUROBOROS_ADMIN_USER_IDS", default="", allow_legacy_secret=True) or ""
 
 
@@ -156,20 +184,24 @@ DIAG_SLOW_CYCLE_SEC = _parse_int_cfg(
     minimum=0,
 )
 
-os.environ["OPENROUTER_API_KEY"] = str(OPENROUTER_API_KEY)
+os.environ["OUROBOROS_LLM_PROVIDER"] = LLM_PROVIDER
+os.environ["OPENROUTER_API_KEY"] = str(OPENROUTER_API_KEY or "")
 os.environ["OPENAI_API_KEY"] = str(OPENAI_API_KEY or "")
 os.environ["ANTHROPIC_API_KEY"] = str(ANTHROPIC_API_KEY or "")
 os.environ["GITHUB_USER"] = str(GITHUB_USER)
 os.environ["GITHUB_REPO"] = str(GITHUB_REPO)
-os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN or "anthropic/claude-sonnet-4.6")
-os.environ["OUROBOROS_MODEL_CODE"] = str(MODEL_CODE or "anthropic/claude-sonnet-4.6")
+os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN or default_main_model(LLM_PROVIDER))
+os.environ["OUROBOROS_MODEL_CODE"] = str(MODEL_CODE or default_code_model(LLM_PROVIDER))
 if MODEL_LIGHT:
     os.environ["OUROBOROS_MODEL_LIGHT"] = str(MODEL_LIGHT)
+if MODEL_FALLBACK_LIST:
+    os.environ["OUROBOROS_MODEL_FALLBACK_LIST"] = str(MODEL_FALLBACK_LIST)
+os.environ["OUROBOROS_DISABLE_CLAUDE_CODE_EDIT"] = str(DISABLE_CLAUDE_CODE_EDIT)
 os.environ["OUROBOROS_DIAG_HEARTBEAT_SEC"] = str(DIAG_HEARTBEAT_SEC)
 os.environ["OUROBOROS_DIAG_SLOW_CYCLE_SEC"] = str(DIAG_SLOW_CYCLE_SEC)
 os.environ["TELEGRAM_BOT_TOKEN"] = str(TELEGRAM_BOT_TOKEN)
 
-if str(ANTHROPIC_API_KEY or "").strip():
+if str(ANTHROPIC_API_KEY or "").strip() and str(DISABLE_CLAUDE_CODE_EDIT).strip().lower() not in ("1", "true", "yes", "on"):
     ensure_claude_code_cli()
 
 # ----------------------------

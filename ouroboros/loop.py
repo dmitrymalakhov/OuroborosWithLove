@@ -38,6 +38,12 @@ _MODEL_PRICING_STATIC = {
     "openai/gpt-4.1": (2.0, 0.50, 8.0),
     "openai/gpt-5.2": (1.75, 0.175, 14.0),
     "openai/gpt-5.2-codex": (1.75, 0.175, 14.0),
+    "o3": (2.0, 0.50, 8.0),
+    "o3-pro": (20.0, 1.0, 80.0),
+    "o4-mini": (1.10, 0.275, 4.40),
+    "gpt-4.1": (2.0, 0.50, 8.0),
+    "gpt-5.2": (1.75, 0.175, 14.0),
+    "gpt-5.2-codex": (1.75, 0.175, 14.0),
     "google/gemini-2.5-pro-preview": (1.25, 0.125, 10.0),
     "google/gemini-3-pro-preview": (2.0, 0.20, 12.0),
     "x-ai/grok-3-mini": (0.30, 0.03, 0.50),
@@ -706,14 +712,15 @@ def run_llm_loop(
             # Fallback to another model if primary model returns empty responses
             if msg is None:
                 # Configurable fallback priority list (Bible P3: no hardcoded behavior)
+                from ouroboros.llm import default_fallback_models
                 fallback_list_raw = os.environ.get(
                     "OUROBOROS_MODEL_FALLBACK_LIST",
-                    "google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6"
+                    default_fallback_models(llm.provider)
                 )
                 fallback_candidates = [m.strip() for m in fallback_list_raw.split(",") if m.strip()]
                 fallback_model = None
                 for candidate in fallback_candidates:
-                    if candidate != active_model:
+                    if candidate != active_model and llm.supports_model(candidate):
                         fallback_model = candidate
                         break
                 if fallback_model is None:

@@ -211,7 +211,7 @@ def _codebase_digest(ctx: ToolContext) -> str:
 
 def _summarize_dialogue(ctx: ToolContext, last_n: int = 200) -> str:
     """Summarize dialogue history into key moments, decisions, and creator preferences."""
-    from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
+    from ouroboros.llm import LLMClient, default_light_model
 
     # Read last_n messages from chat.jsonl
     chat_path = ctx.drive_root / "logs" / "chat.jsonl"
@@ -268,7 +268,7 @@ Now write a comprehensive summary:"""
 
         # Call LLM
         llm = LLMClient()
-        model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
+        model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or default_light_model()
 
         messages = [
             {"role": "user", "content": prompt}

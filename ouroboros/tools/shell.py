@@ -17,6 +17,20 @@ from ouroboros.utils import utc_now_iso, run_cmd, append_jsonl, truncate_for_log
 log = logging.getLogger(__name__)
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _claude_code_edit_disabled() -> bool:
+    explicit = os.environ.get("OUROBOROS_DISABLE_CLAUDE_CODE_EDIT")
+    if explicit is not None:
+        return _env_flag("OUROBOROS_DISABLE_CLAUDE_CODE_EDIT")
+    return os.environ.get("OUROBOROS_LLM_PROVIDER", "").strip().lower() in ("openai", "openai_api", "native_openai")
+
+
 def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
     # Recover from LLM sending cmd as JSON string instead of list
     if isinstance(cmd, str):
@@ -173,6 +187,9 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
     """Delegate code edits to Claude Code CLI."""
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
 
+    if _claude_code_edit_disabled():
+        return "⚠️ claude_code_edit disabled by configuration. Use repo_write_commit for code edits."
+
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return "⚠️ ANTHROPIC_API_KEY not set, claude_code_edit unavailable."
@@ -240,7 +257,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
 
 
 def get_tools() -> List[ToolEntry]:
-    return [
+    tools = [
         ToolEntry("run_shell", {
             "name": "run_shell",
             "description": "Run a shell command (list of args) inside the repo. Returns stdout+stderr.",
@@ -249,6 +266,10 @@ def get_tools() -> List[ToolEntry]:
                 "cwd": {"type": "string", "default": ""},
             }, "required": ["cmd"]},
         }, _run_shell, is_code_tool=True),
+    ]
+    if _claude_code_edit_disabled():
+        return tools
+    tools.append(
         ToolEntry("claude_code_edit", {
             "name": "claude_code_edit",
             "description": "Delegate code edits to Claude Code CLI. Preferred for multi-file changes and refactors. Follow with repo_commit_push.",
@@ -257,4 +278,5 @@ def get_tools() -> List[ToolEntry]:
                 "cwd": {"type": "string", "default": ""},
             }, "required": ["prompt"]},
         }, _claude_code_edit, is_code_tool=True, timeout_sec=300),
-    ]
+    )
+    return tools

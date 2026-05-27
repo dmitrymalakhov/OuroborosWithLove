@@ -20,12 +20,10 @@ from ouroboros.tools.registry import ToolContext, ToolEntry
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_VLM_MODEL = "anthropic/claude-sonnet-4.6"
-
-
 def _get_vlm_model() -> str:
     """Get VLM model from env or use default."""
-    return os.environ.get("OUROBOROS_MODEL", _DEFAULT_VLM_MODEL)
+    from ouroboros.llm import default_main_model
+    return os.environ.get("OUROBOROS_MODEL", "") or default_main_model()
 
 
 def _get_llm_client():

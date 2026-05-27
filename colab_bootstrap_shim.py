@@ -34,12 +34,17 @@ def export_secret_to_env(name: str, required: bool = False) -> Optional[str]:
     return val
 
 
+_provider = os.environ.get("OUROBOROS_LLM_PROVIDER", "openrouter").strip().lower().replace("-", "_")
+_using_openai = _provider in ("openai", "openai_api", "native_openai")
+
 # Export required runtime secrets so subprocess launcher can always read env fallback.
-for _name in ("OPENROUTER_API_KEY", "TELEGRAM_BOT_TOKEN", "TOTAL_BUDGET", "GITHUB_TOKEN"):
+for _name in ("TELEGRAM_BOT_TOKEN", "TOTAL_BUDGET", "GITHUB_TOKEN"):
     export_secret_to_env(_name, required=True)
+export_secret_to_env("OPENROUTER_API_KEY", required=not _using_openai)
+export_secret_to_env("OPENAI_API_KEY", required=_using_openai)
 
 # Optional secrets (keep empty if missing).
-for _name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+for _name in ("ANTHROPIC_API_KEY",):
     export_secret_to_env(_name, required=False)
 
 # Colab diagnostics defaults (override in config cell if needed).

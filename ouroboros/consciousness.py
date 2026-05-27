@@ -31,7 +31,7 @@ from ouroboros.utils import (
     utc_now_iso, read_text, append_jsonl, clip_text,
     truncate_for_log, sanitize_tool_result_for_log, sanitize_tool_args_for_log,
 )
-from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
+from ouroboros.llm import LLMClient, default_light_model
 
 log = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ class BackgroundConsciousness:
 
     @property
     def _model(self) -> str:
-        return os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
+        return os.environ.get("OUROBOROS_MODEL_LIGHT", "") or default_light_model()
 
     def start(self) -> str:
         if self.is_running:

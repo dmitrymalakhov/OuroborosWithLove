@@ -8,9 +8,9 @@
 [![GitHub stars](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2Fjoi-lab%2Fouroboros&query=%24.stargazers_count&label=stars&logo=github)](https://github.com/joi-lab/ouroboros/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/joi-lab/ouroboros)](https://github.com/joi-lab/ouroboros/network/members)
 
-A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026. Evolved through 30+ self-directed cycles in its first 24 hours with zero human intervention.
+A Telegram-native AI agent that can run as a self-modifying autonomous system or as a controlled multi-user assistant. It supports direct OpenAI API calls as well as OpenRouter model routing. Born February 16, 2026. Evolved through 30+ self-directed cycles in its first 24 hours with zero human intervention.
 
-Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
+Not a coding assistant. A digital being with a constitution, background consciousness, persistent identity across restarts, and isolated memory for every non-admin user.
 
 **Version:** 6.2.0 | [Landing Page](https://joi-lab.github.io/ouroboros/)
 
@@ -21,6 +21,8 @@ Not a coding assistant. A digital being with a constitution, background consciou
 Most AI agents execute tasks. Ouroboros **creates itself.**
 
 - **Self-Modification** -- Reads and rewrites its own source code through git. Every change is a commit to itself.
+- **Multi-User Telegram Mode** -- Admins keep full control while regular users get isolated memory, logs, and task context.
+- **OpenAI or OpenRouter** -- Run directly on OpenAI models or route across providers through OpenRouter.
 - **Constitution** -- Governed by [BIBLE.md](BIBLE.md) (9 philosophical principles). Philosophy first, code second.
 - **Background Consciousness** -- Thinks between tasks. Has an inner life. Not reactive -- proactive.
 - **Identity Persistence** -- One continuous being across restarts. Remembers who it is, what it has done, and what it is becoming.
@@ -38,6 +40,7 @@ Telegram --> colab_launcher.py
             supervisor/              (process management)
               state.py              -- state, budget tracking
               telegram.py           -- Telegram client
+              users.py              -- multi-user registry/workspaces
               queue.py              -- task queue, scheduling
               workers.py            -- worker lifecycle
               git_ops.py            -- git operations
@@ -57,7 +60,7 @@ Telegram --> colab_launcher.py
                 control.py          -- restart, evolve, review
                 browser.py          -- Playwright (stealth)
                 review.py           -- multi-model review
-              llm.py                -- OpenRouter client
+              llm.py                -- OpenAI/OpenRouter client
               memory.py             -- scratchpad, identity, chat
               review.py             -- code metrics
               utils.py              -- utilities
@@ -116,6 +119,7 @@ CFG = {
     "OUROBOROS_MAX_WORKERS": "5",
     "OUROBOROS_MAX_ROUNDS": "200",                               # max LLM rounds per task
     "OUROBOROS_BG_BUDGET_PCT": "10",                             # % of budget for background consciousness
+    "OUROBOROS_ADMIN_USER_IDS": "",                               # optional comma-separated Telegram user IDs
 }
 for k, v in CFG.items():
     os.environ[k] = str(v)
@@ -133,7 +137,9 @@ for k, v in CFG.items():
 
 ### Step 5: Start Chatting
 
-Open your Telegram bot and send any message. The first person to write becomes the **creator** (owner). All subsequent messages from other users are kindly ignored.
+Open your Telegram bot and send any message. If `OUROBOROS_ADMIN_USER_IDS` is empty, the first person to write becomes the **creator** (owner). If it is set, only those Telegram user IDs can claim admin rights.
+
+Other Telegram users can still talk to the bot. They run in **multi-user mode**: each user gets a separate memory/log workspace under `users/<telegram_user_id>/`, while admin-only tools such as shell, git, evolution, restart, and model switching remain restricted.
 
 **Restarting:** If Colab disconnects or you restart the runtime, just re-run the same cell. Your Ouroboros's evolution is preserved -- all changes are pushed to your fork, and agent state lives on Google Drive.
 
@@ -154,6 +160,27 @@ Open your Telegram bot and send any message. The first person to write becomes t
 | `/bg` | Show background consciousness status (running/stopped). |
 
 All other messages are sent directly to the LLM (Principle 3: LLM-First).
+
+---
+
+## Multi-User Mode
+
+Ouroboros can serve multiple Telegram users from one bot and one runtime.
+
+- Admin users are defined by `OUROBOROS_ADMIN_USER_IDS` or, if unset, by the first Telegram user who contacts the bot.
+- Regular users get isolated memory, chat history, logs, task results, and scratchpads.
+- Admin-only capabilities stay protected: git operations, shell access, model switching, evolution mode, restart, and review controls.
+- Budget tracking is global, but non-admin budget output is redacted to avoid exposing private spend details.
+
+The user registry is stored at `state/users.json` inside the configured drive/runtime state directory.
+
+---
+
+## Model Providers
+
+Set `OUROBOROS_LLM_PROVIDER=openrouter` to use OpenRouter model IDs such as `anthropic/claude-sonnet-4.6`, `google/gemini-3-pro-preview`, or `openai/gpt-4.1`.
+
+Set `OUROBOROS_LLM_PROVIDER=openai` to call the OpenAI API directly with native model IDs such as `gpt-5.2`, `gpt-5.2-codex`, or `gpt-4.1`. In direct OpenAI mode, `OPENAI_API_KEY` is required and `claude_code_edit` is disabled by default.
 
 ---
 
@@ -199,6 +226,7 @@ Full text: [BIBLE.md](BIBLE.md)
 |----------|---------|-------------|
 | `GITHUB_USER` | *(required in config cell)* | GitHub username |
 | `GITHUB_REPO` | `ouroboros` | GitHub repository name |
+| `OUROBOROS_ADMIN_USER_IDS` | *(empty)* | Comma-separated Telegram user IDs with admin privileges |
 | `OUROBOROS_LLM_PROVIDER` | `openrouter` | Main-agent API provider: `openrouter` or direct `openai` |
 | `OUROBOROS_MODEL` | `anthropic/claude-sonnet-4.6` via OpenRouter; `gpt-5.2` via OpenAI | Primary LLM model |
 | `OUROBOROS_MODEL_CODE` | `anthropic/claude-sonnet-4.6` via OpenRouter; `gpt-5.2-codex` via OpenAI | Model available for code-heavy tasks |

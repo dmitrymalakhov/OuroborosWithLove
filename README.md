@@ -39,35 +39,45 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 ## Architecture
 
 ```
-Telegram --> colab_launcher.py
-                |
-            supervisor/              (process management)
-              state.py              -- state, budget tracking
-              telegram.py           -- Telegram client
-              users.py              -- multi-user registry/workspaces
-              queue.py              -- task queue, scheduling
-              workers.py            -- worker lifecycle
-              git_ops.py            -- git operations
-              events.py             -- event dispatch
-                |
-            ouroboros/               (agent core)
-              agent.py              -- thin orchestrator
-              consciousness.py      -- background thinking loop
-              context.py            -- LLM context, prompt caching
-              loop.py               -- tool loop, concurrent execution
-              tools/                -- plugin registry (auto-discovery)
-                core.py             -- file ops
-                git.py              -- git ops
-                github.py           -- GitHub Issues
-                shell.py            -- shell, Claude Code CLI
-                search.py           -- web search
-                control.py          -- restart, evolve, review
-                browser.py          -- Playwright (stealth)
-                review.py           -- multi-model review
-              llm.py                -- OpenAI/OpenRouter client
-              memory.py             -- scratchpad, identity, chat
-              review.py             -- code metrics
-              utils.py              -- utilities
+Telegram users
+    |
+    v
+colab_launcher.py / server runtime
+    |
+    v
+supervisor/                         (runtime orchestration)
+  telegram.py                       -- Telegram polling, replies, budget display
+  users.py                          -- admin/user registry and isolated workspaces
+  state.py                          -- global state, budget tracking, persistence
+  queue.py                          -- task queue, scheduling, snapshots
+  workers.py                        -- direct chat agents and background workers
+  events.py                         -- event dispatch from agents/tools
+  git_ops.py                        -- optional self-modification sync/restart path
+    |
+    v
+per-user runtime roots
+  admin                             -- legacy global memory, full admin tool surface
+  users/<telegram_user_id>/         -- isolated memory, logs, task results
+    |
+    v
+ouroboros/                          (agent core)
+  agent.py                          -- thin task/chat orchestrator
+  consciousness.py                  -- optional background thinking loop
+  context.py                        -- system prompt, memory, health context
+  loop.py                           -- LLM tool loop, retries, usage tracking
+  llm.py                            -- provider-aware OpenAI SDK wrapper
+      openai                        -- direct OpenAI API provider
+      openrouter                    -- OpenRouter multi-provider routing
+  memory.py                         -- scratchpad, identity, chat history
+  tools/                            -- auto-discovered tool registry
+      core.py                       -- file/drive operations, summaries
+      registry.py                   -- admin-only and user-safe tool filtering
+      git.py                        -- optional repo write/commit/push tools
+      shell.py                      -- shell and optional Claude Code CLI
+      search.py                     -- OpenAI Responses web search
+      browser.py                    -- Playwright browser automation
+      control.py                    -- restart, background, evolution controls
+      review.py                     -- multi-model review via OpenRouter
 ```
 
 ---

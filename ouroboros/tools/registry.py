@@ -97,7 +97,7 @@ CORE_TOOL_NAMES = {
     "schedule_task", "wait_for_task", "get_task_result",
     "update_scratchpad", "update_identity",
     "chat_history", "web_search",
-    "analyze_document",
+    "analyze_document", "extract_archive", "download_url_to_drive",
     "send_owner_message", "switch_model",
     "request_restart", "promote_to_stable",
     "knowledge_read", "knowledge_write",

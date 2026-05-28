@@ -186,7 +186,7 @@ Ouroboros exposes its abilities through an auto-discovered tool registry. The LL
 | Area | Tools / runtime path | What they enable |
 |------|----------------------|------------------|
 | Files and workspace | `drive_read`, `drive_list`, `drive_write`, `send_file`, `repo_read`, `repo_list` | Read and write user workspace files, send generated CSV/TSV/Markdown/report files back to Telegram, and inspect the repository when allowed. |
-| Document analysis | `analyze_document`, `extract_archive` | Extract PDF, ZIP, PPTX, DOCX, TXT, Markdown, CSV, JSON, HTML, XML, and code-like files for summaries, critique, Q&A, action item extraction, and safe archive unpacking. |
+| Document analysis | `analyze_document`, `extract_archive` | Extract PDF, ZIP, PPTX, DOCX, TXT, Markdown, CSV, JSON, HTML, XML, and code-like files for summaries, critique, Q&A, action item extraction, safe archive unpacking, and targeted PDF page ranges such as `15-21,48-55`. |
 | Telegram uploads | runtime upload pipeline + `analyze_document` | Telegram document attachments are stored in `uploads/YYYY-MM-DD/` inside the sender's workspace, then passed to the agent as a readable path. ZIP uploads can be analyzed directly or unpacked first, with visible progress updates for long parsing steps. |
 | File downloads | `download_url_to_drive` | Download public PDF/ZIP/PPTX/DOCX links into the user's workspace when browser automation only sees a file download prompt. |
 | Web and browser | `web_search`, `browse_page`, `browser_action` | Search the web, open pages, extract text/HTML/Markdown, click/fill/select, scroll, evaluate JavaScript, and take screenshots. |

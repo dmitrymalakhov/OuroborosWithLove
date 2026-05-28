@@ -223,6 +223,11 @@ that would be long in chat, write it to Drive with `drive_write` and send it
 as a Telegram document with `send_file`. In chat, give only a short preview
 and say the file is attached.
 
+For long PDFs, do not ask the creator to manually split pages after you find a
+table of contents. Call `analyze_document` again with `page_ranges`, for
+example `page_ranges="15-21,48-55"`, and raise `max_chars` if the selected
+sections are still clipped.
+
 New tools: module in `ouroboros/tools/`, export `get_tools()`.
 The registry discovers them automatically.
 

@@ -3,7 +3,7 @@ import zipfile
 
 import pytest
 
-from ouroboros.tools.documents import _analyze_document, _extract_archive
+from ouroboros.tools.documents import _analyze_document, _extract_archive, _parse_page_ranges
 from ouroboros.tools.registry import ToolContext
 
 
@@ -109,6 +109,55 @@ def test_analyze_document_extracts_supported_files_inside_zip(tmp_path):
     assert "Important issuer disclosure." in result
     assert "notes/info.txt / Text" in result
     assert "SPV list and INN references" in result
+
+
+def test_analyze_document_extracts_requested_pdf_page_ranges(tmp_path, monkeypatch):
+    class FakePage:
+        def __init__(self, number: int):
+            self.number = number
+
+        def extract_text(self):
+            return f"Text from page {self.number}"
+
+    class FakeReader:
+        is_encrypted = False
+
+        def __init__(self, _path: str):
+            self.pages = [FakePage(idx) for idx in range(1, 11)]
+
+    drive = tmp_path / "drive"
+    repo = tmp_path / "repo"
+    drive.mkdir()
+    (drive / "report.pdf").write_bytes(b"%PDF fake")
+    monkeypatch.setattr(
+        "ouroboros.tools.documents._try_import_pdf_reader",
+        lambda: (FakeReader, "fakepdf"),
+    )
+
+    result = _analyze_document(
+        _ctx(repo, drive),
+        path="report.pdf",
+        analysis_type="answer_question",
+        question="What is on the target pages?",
+        page_ranges="3-4,7",
+        max_pages=10,
+    )
+
+    assert "pages_extracted: 3-4,7" in result
+    assert "Page 3" in result
+    assert "Text from page 3" in result
+    assert "Page 4" in result
+    assert "Page 7" in result
+    assert "Page 1" not in result
+    assert "Text from page 2" not in result
+
+
+def test_parse_page_ranges_caps_and_skips_out_of_range():
+    pages, warnings = _parse_page_ranges("2-4,9,12", total_pages=10, max_pages=3)
+
+    assert pages == [2, 3, 4]
+    assert any("Only the first 3 selected pages" in warning for warning in warnings)
+    assert any("Skipped pages outside document length: 12" in warning for warning in warnings)
 
 
 def test_analyze_document_emits_progress_for_zip(tmp_path):

@@ -79,6 +79,72 @@ def _normalize_analysis_type(value: str) -> str:
     return value
 
 
+def _format_page_selection(pages: List[int]) -> str:
+    if not pages:
+        return ""
+    ranges: List[str] = []
+    start = prev = pages[0]
+    for page in pages[1:]:
+        if page == prev + 1:
+            prev = page
+            continue
+        ranges.append(str(start) if start == prev else f"{start}-{prev}")
+        start = prev = page
+    ranges.append(str(start) if start == prev else f"{start}-{prev}")
+    return ",".join(ranges)
+
+
+def _parse_page_ranges(
+    page_ranges: str,
+    total_pages: int | None,
+    max_pages: int,
+) -> Tuple[List[int], List[str]]:
+    warnings: List[str] = []
+    raw = str(page_ranges or "").strip()
+    if not raw:
+        if total_pages is None:
+            return list(range(1, max_pages + 1)), warnings
+        pages = list(range(1, min(total_pages, max_pages) + 1))
+        if total_pages > max_pages:
+            warnings.append(f"Only the first {max_pages} of {total_pages} pages were extracted.")
+        return pages, warnings
+
+    normalized = raw.replace("—", "-").replace("–", "-")
+    tokens = [token for token in re.split(r"[,;\s]+", normalized) if token]
+    pages: List[int] = []
+    seen = set()
+    skipped_out_of_range: List[int] = []
+
+    for token in tokens:
+        match = re.fullmatch(r"(\d+)(?:-(\d+))?", token)
+        if not match:
+            raise ValueError(f"Invalid page_ranges token: {token!r}. Use format like '15-21,48-55'.")
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if start < 1 or end < 1:
+            raise ValueError("page_ranges must use 1-based positive page numbers")
+        if end < start:
+            raise ValueError(f"Invalid page range: {token!r}")
+        for page in range(start, end + 1):
+            if total_pages is not None and page > total_pages:
+                skipped_out_of_range.append(page)
+                continue
+            if page not in seen:
+                pages.append(page)
+                seen.add(page)
+
+    if not pages:
+        raise ValueError("page_ranges did not select any pages")
+    if len(pages) > max_pages:
+        warnings.append(f"Only the first {max_pages} selected pages were extracted from page_ranges={raw!r}.")
+        pages = pages[:max_pages]
+    if skipped_out_of_range:
+        warnings.append(
+            f"Skipped pages outside document length: {_format_page_selection(skipped_out_of_range)}."
+        )
+    return pages, warnings
+
+
 def _resolve_document_path(ctx: ToolContext, path: str, source: str) -> Path:
     if not path or not isinstance(path, str):
         raise ValueError("path must be a non-empty string")
@@ -166,6 +232,7 @@ def _try_import_pdf_reader():
 def _extract_pdf_with_python(
     path: Path,
     max_pages: int,
+    page_ranges: str = "",
     progress: ProgressFn | None = None,
 ) -> ExtractedDocument | None:
     PdfReader, library = _try_import_pdf_reader()
@@ -181,28 +248,32 @@ def _extract_pdf_with_python(
             warnings.append("PDF is encrypted and could not be decrypted with an empty password.")
 
     total_pages = len(reader.pages)
-    pages_to_extract = min(total_pages, max_pages)
+    pages, range_warnings = _parse_page_ranges(page_ranges, total_pages, max_pages)
+    warnings.extend(range_warnings)
+    selection = _format_page_selection(pages)
     _emit_progress(
         progress,
-        f"Открыл PDF `{path.name}`: {total_pages} стр. Извлекаю текст из первых {pages_to_extract} стр.; если текста много, это может занять пару минут.",
+        f"Открыл PDF `{path.name}`: {total_pages} стр. Извлекаю текст со страниц {selection}; если текста много, это может занять пару минут.",
     )
     sections: List[Tuple[str, str]] = []
-    for idx in range(1, pages_to_extract + 1):
-        if idx == 1 or idx == pages_to_extract or idx % 10 == 0:
-            _emit_progress(progress, f"Читаю PDF `{path.name}`: страница {idx}/{pages_to_extract}.")
-        page = reader.pages[idx - 1]
+    total_selected = len(pages)
+    for position, page_num in enumerate(pages, start=1):
+        if position == 1 or position == total_selected or position % 10 == 0:
+            _emit_progress(progress, f"Читаю PDF `{path.name}`: страница {page_num} ({position}/{total_selected}).")
+        page = reader.pages[page_num - 1]
         try:
             text = page.extract_text() or ""
         except Exception as exc:
             text = f"[Could not extract page text: {type(exc).__name__}: {exc}]"
-        sections.append((f"Page {idx}", text.strip() or "[No extractable text]"))
-
-    if total_pages > max_pages:
-        warnings.append(f"Only the first {max_pages} of {total_pages} pages were extracted.")
+        sections.append((f"Page {page_num}", text.strip() or "[No extractable text]"))
 
     return ExtractedDocument(
         kind="pdf",
-        metadata={"pages": str(total_pages), "extractor": library},
+        metadata={
+            "pages": str(total_pages),
+            "pages_extracted": selection,
+            "extractor": library,
+        },
         sections=sections,
         warnings=warnings,
     )
@@ -211,40 +282,84 @@ def _extract_pdf_with_python(
 def _extract_pdf_with_pdftotext(
     path: Path,
     max_pages: int,
+    page_ranges: str = "",
     progress: ProgressFn | None = None,
 ) -> ExtractedDocument | None:
-    _emit_progress(progress, f"Извлекаю текст из PDF `{path.name}` через pdftotext, до {max_pages} стр.")
-    try:
-        proc = subprocess.run(
-            ["pdftotext", "-layout", "-f", "1", "-l", str(max_pages), str(path), "-"],
-            text=True,
-            capture_output=True,
-            timeout=45,
-            check=False,
+    if not str(page_ranges or "").strip():
+        _emit_progress(progress, f"Извлекаю текст из PDF `{path.name}` через pdftotext, до {max_pages} стр.")
+        try:
+            proc = subprocess.run(
+                ["pdftotext", "-layout", "-f", "1", "-l", str(max_pages), str(path), "-"],
+                text=True,
+                capture_output=True,
+                timeout=45,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return None
+
+        if proc.returncode != 0:
+            return ExtractedDocument(
+                kind="pdf",
+                metadata={"extractor": "pdftotext"},
+                warnings=[proc.stderr.strip() or "pdftotext failed"],
+            )
+
+        return ExtractedDocument(
+            kind="pdf",
+            metadata={"extractor": "pdftotext", "pages": f"first {max_pages}"},
+            sections=[("PDF text", proc.stdout.strip() or "[No extractable text]")],
         )
+
+    pages, warnings = _parse_page_ranges(page_ranges, None, max_pages)
+    selection = _format_page_selection(pages)
+    _emit_progress(progress, f"Извлекаю текст из PDF `{path.name}` через pdftotext, страницы {selection}.")
+    sections: List[Tuple[str, str]] = []
+    try:
+        for page_num in pages:
+            proc = subprocess.run(
+                ["pdftotext", "-layout", "-f", str(page_num), "-l", str(page_num), str(path), "-"],
+                text=True,
+                capture_output=True,
+                timeout=45,
+                check=False,
+            )
+            if proc.returncode != 0:
+                return ExtractedDocument(
+                    kind="pdf",
+                    metadata={"extractor": "pdftotext"},
+                    warnings=[proc.stderr.strip() or "pdftotext failed"],
+                )
+            sections.append((f"Page {page_num}", proc.stdout.strip() or "[No extractable text]"))
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
 
-    if proc.returncode != 0:
+    if not sections:
         return ExtractedDocument(
             kind="pdf",
             metadata={"extractor": "pdftotext"},
-            warnings=[proc.stderr.strip() or "pdftotext failed"],
+            warnings=["pdftotext did not return any pages"],
         )
 
     return ExtractedDocument(
         kind="pdf",
-        metadata={"extractor": "pdftotext", "pages": f"first {max_pages}"},
-        sections=[("PDF text", proc.stdout.strip() or "[No extractable text]")],
+        metadata={"extractor": "pdftotext", "pages_extracted": selection},
+        sections=sections,
+        warnings=warnings,
     )
 
 
-def _extract_pdf(path: Path, max_pages: int, progress: ProgressFn | None = None) -> ExtractedDocument:
-    extracted = _extract_pdf_with_python(path, max_pages, progress=progress)
+def _extract_pdf(
+    path: Path,
+    max_pages: int,
+    page_ranges: str = "",
+    progress: ProgressFn | None = None,
+) -> ExtractedDocument:
+    extracted = _extract_pdf_with_python(path, max_pages, page_ranges=page_ranges, progress=progress)
     if extracted is not None:
         return extracted
 
-    extracted = _extract_pdf_with_pdftotext(path, max_pages, progress=progress)
+    extracted = _extract_pdf_with_pdftotext(path, max_pages, page_ranges=page_ranges, progress=progress)
     if extracted is not None:
         return extracted
 
@@ -362,6 +477,7 @@ def _extract_zip(
     max_pages: int,
     max_slides: int,
     max_archive_files: int,
+    page_ranges: str = "",
     progress: ProgressFn | None = None,
 ) -> ExtractedDocument:
     warnings: List[str] = []
@@ -442,6 +558,7 @@ def _extract_zip(
                     max_slides=max_slides,
                     max_archive_files=max_archive_files,
                     allow_archives=False,
+                    page_ranges=page_ranges,
                     progress=progress,
                 )
                 analyzed += 1
@@ -478,11 +595,12 @@ def _extract_document(
     max_slides: int,
     max_archive_files: int = MAX_ARCHIVE_FILES,
     allow_archives: bool = True,
+    page_ranges: str = "",
     progress: ProgressFn | None = None,
 ) -> ExtractedDocument:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        return _extract_pdf(path, max_pages, progress=progress)
+        return _extract_pdf(path, max_pages, page_ranges=page_ranges, progress=progress)
     if suffix == ".pptx":
         return _extract_pptx(path, max_slides, progress=progress)
     if suffix == ".docx":
@@ -493,6 +611,7 @@ def _extract_document(
             max_pages=max_pages,
             max_slides=max_slides,
             max_archive_files=max_archive_files,
+            page_ranges=page_ranges,
             progress=progress,
         )
     if suffix in TEXT_EXTENSIONS:
@@ -755,6 +874,7 @@ def _analyze_document(
     source: str = "drive",
     analysis_type: str = "summary",
     question: str = "",
+    page_ranges: str = "",
     max_chars: int = DEFAULT_MAX_CHARS,
     max_pages: int = DEFAULT_MAX_PAGES,
     max_slides: int = DEFAULT_MAX_SLIDES,
@@ -774,6 +894,7 @@ def _analyze_document(
         max_pages=max_pages,
         max_slides=max_slides,
         max_archive_files=max_archive_files,
+        page_ranges=page_ranges,
         progress=ctx.emit_progress_fn,
     )
     _emit_progress(ctx.emit_progress_fn, f"Извлечение текста из `{document_path.name}` завершено. Собираю ответ по твоему запросу.")
@@ -785,9 +906,10 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("analyze_document", {
             "name": "analyze_document",
             "description": (
-                "Extract text and structure from PDF, PPTX, DOCX, and text-like files for analysis. "
+                "Extract text and structure from PDF, ZIP, PPTX, DOCX, and text-like files for analysis. "
                 "Use it before summarizing documents, critiquing presentations, answering questions "
-                "about uploaded files, or extracting action items. Default source is the user's Drive workspace."
+                "about uploaded files, or extracting action items. For long PDFs, use page_ranges to read "
+                "specific later sections instead of asking the user to split the file. Default source is the user's Drive workspace."
             ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string", "description": "Document path relative to the selected source root."},
@@ -807,6 +929,13 @@ def get_tools() -> List[ToolEntry]:
                     "type": "string",
                     "description": "Question to answer when analysis_type is answer_question.",
                 },
+                "page_ranges": {
+                    "type": "string",
+                    "description": (
+                        "Optional 1-based PDF page ranges to extract, e.g. '15-21,48-55'. "
+                        "Use this after a table of contents points to later sections, instead of asking the user to split the PDF."
+                    ),
+                },
                 "max_chars": {
                     "type": "integer",
                     "default": DEFAULT_MAX_CHARS,
@@ -815,7 +944,7 @@ def get_tools() -> List[ToolEntry]:
                 "max_pages": {
                     "type": "integer",
                     "default": DEFAULT_MAX_PAGES,
-                    "description": "Maximum PDF pages to extract.",
+                    "description": "Maximum PDF pages to extract, including pages selected by page_ranges.",
                 },
                 "max_slides": {
                     "type": "integer",

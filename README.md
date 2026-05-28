@@ -134,6 +134,7 @@ CFG = {
     "OUROBOROS_MAX_ROUNDS": "200",                               # max LLM rounds per task
     "OUROBOROS_BG_BUDGET_PCT": "10",                             # % of budget for background consciousness
     "OUROBOROS_ADMIN_USER_IDS": "",                               # optional comma-separated Telegram user IDs
+    "OUROBOROS_APPROVED_USER_IDS": "",                            # optional pre-approved regular Telegram user IDs
     "OUROBOROS_REQUIRE_USER_APPROVAL": "1",                       # require admin approval for new users
 }
 for k, v in CFG.items():
@@ -278,6 +279,7 @@ Full text: [BIBLE.md](BIBLE.md)
 | `GITHUB_USER` | *(required in config cell)* | GitHub username |
 | `GITHUB_REPO` | `ouroboros` | GitHub repository name |
 | `OUROBOROS_ADMIN_USER_IDS` | *(empty)* | Comma-separated Telegram user IDs with admin privileges |
+| `OUROBOROS_APPROVED_USER_IDS` | *(empty)* | Comma-separated regular Telegram user IDs that should keep access without a new approval request |
 | `OUROBOROS_REQUIRE_USER_APPROVAL` | `1` | Require admin approval before new regular users can use the bot |
 | `OUROBOROS_DISABLE_SELF_MODIFICATION` | `0` | Disable repo write/push/restart/evolution tools and allow running without `GITHUB_TOKEN` |
 | `OUROBOROS_BRANCH_DEV` | `ouroboros`; `main` when self-modification is disabled | Runtime branch for development/self-modification |

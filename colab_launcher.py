@@ -171,6 +171,12 @@ def _parse_admin_user_ids(raw: str) -> Set[int]:
 
 ADMIN_USER_IDS = _parse_admin_user_ids(ADMIN_USER_IDS_RAW)
 REQUIRE_USER_APPROVAL = _env_flag("OUROBOROS_REQUIRE_USER_APPROVAL", default=True)
+APPROVED_USER_IDS = _parse_admin_user_ids(
+    ",".join([
+        get_cfg("OUROBOROS_APPROVED_USER_IDS", default="", allow_legacy_secret=True) or "",
+        os.environ.get("ALLOWED_TELEGRAM_IDS", ""),
+    ])
+)
 
 
 def _is_admin_user(user_id: int, st: Dict[str, Any]) -> bool:
@@ -373,6 +379,7 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
     "worker_start_method": str(os.environ.get("OUROBOROS_WORKER_START_METHOD") or ""),
     "disable_self_modification": DISABLE_SELF_MODIFICATION,
     "require_user_approval": REQUIRE_USER_APPROVAL,
+    "approved_user_ids_count": len(APPROVED_USER_IDS),
     "diag_heartbeat_sec": DIAG_HEARTBEAT_SEC,
     "diag_slow_cycle_sec": DIAG_SLOW_CYCLE_SEC,
 })
@@ -910,7 +917,8 @@ while True:
 
         is_admin = _is_admin_user(user_id, st)
         user_role = "admin" if is_admin else "user"
-        if REQUIRE_USER_APPROVAL and not is_admin:
+        preapproved_user = user_id in APPROVED_USER_IDS
+        if REQUIRE_USER_APPROVAL and not is_admin and not preapproved_user:
             access_rec, access_created, should_notify_admins = request_user_access(
                 DRIVE_ROOT, user_id, chat_id, from_user,
             )

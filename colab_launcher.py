@@ -781,6 +781,13 @@ while True:
                     log_user_id=user_id,
                 )
             elif saved_document:
+                send_with_budget(
+                    chat_id,
+                    f"📎 Файл получил: {saved_document['filename']}. Добавил его к текущей задаче, разберу после текущего шага.",
+                    is_progress=True,
+                    log_drive_root=user_drive_root,
+                    log_user_id=user_id,
+                )
                 doc_note = (
                     f"{text or caption or 'Document attached.'}\n\n"
                     "[Telegram document saved]\n"
@@ -801,6 +808,13 @@ while True:
             agent._dispatching = True
             final_text = text
             if saved_document:
+                send_with_budget(
+                    chat_id,
+                    f"📎 Файл получил: {saved_document['filename']}. Сохранил в workspace, сейчас открою и разберу содержимое.",
+                    is_progress=True,
+                    log_drive_root=user_drive_root,
+                    log_user_id=user_id,
+                )
                 doc_note = (
                     "\n\n[Telegram document saved]\n"
                     f"- path: {saved_document['path']}\n"

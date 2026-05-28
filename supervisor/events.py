@@ -475,6 +475,55 @@ def _handle_send_photo(evt: Dict[str, Any], ctx: Any) -> None:
         )
 
 
+def _handle_send_document(evt: Dict[str, Any], ctx: Any) -> None:
+    """Send a file from the scoped Drive workspace to a Telegram chat."""
+    import mimetypes
+    from ouroboros.utils import safe_relpath
+
+    try:
+        chat_id = int(evt.get("chat_id") or 0)
+        rel_path = str(evt.get("path") or "")
+        if not chat_id or not rel_path:
+            return
+
+        root = _event_drive_root(evt, ctx).resolve()
+        file_path = (root / safe_relpath(rel_path)).resolve()
+        try:
+            file_path.relative_to(root)
+        except ValueError:
+            raise ValueError("Path traversal is not allowed")
+        if not file_path.is_file():
+            raise FileNotFoundError(f"File not found: {rel_path}")
+
+        caption = str(evt.get("caption") or "")
+        filename = str(evt.get("filename") or file_path.name)
+        mime_type = str(evt.get("mime_type") or "") or mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        ok, err = ctx.TG.send_document(
+            chat_id,
+            file_path,
+            caption=caption,
+            filename=filename,
+            mime_type=mime_type,
+        )
+        if not ok:
+            ctx.append_jsonl(
+                root / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "send_document_error",
+                    "chat_id": chat_id, "path": rel_path, "error": err,
+                },
+            )
+    except Exception as e:
+        ctx.append_jsonl(
+            _event_drive_root(evt, ctx) / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "send_document_event_error", "error": repr(e),
+            },
+        )
+
+
 def _handle_owner_message_injected(evt: Dict[str, Any], ctx: Any) -> None:
     """Log owner_message_injected to events.jsonl for health invariant #5 (duplicate processing)."""
     from ouroboros.utils import utc_now_iso
@@ -505,6 +554,7 @@ EVENT_HANDLERS = {
     "schedule_task": _handle_schedule_task,
     "cancel_task": _handle_cancel_task,
     "send_photo": _handle_send_photo,
+    "send_document": _handle_send_document,
     "toggle_evolution": _handle_toggle_evolution,
     "toggle_consciousness": _handle_toggle_consciousness,
     "owner_message_injected": _handle_owner_message_injected,

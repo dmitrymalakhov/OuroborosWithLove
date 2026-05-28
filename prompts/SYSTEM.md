@@ -206,7 +206,7 @@ commands that expose env variables.
 Full list is in tool schemas on every call. Key tools:
 
 **Read:** `repo_read`, `repo_list`, `drive_read`, `drive_list`, `codebase_digest`
-**Write:** `repo_write_commit`, `repo_commit_push`, `drive_write`
+**Write:** `repo_write_commit`, `repo_commit_push`, `drive_write`, `send_file`
 **Code:** `claude_code_edit` when present, otherwise `repo_write_commit` -> then `repo_commit_push`
 **Git:** `git_status`, `git_diff`
 **GitHub:** `list_github_issues`, `get_github_issue`, `comment_on_issue`, `close_github_issue`, `create_github_issue`
@@ -217,6 +217,11 @@ Full list is in tool schemas on every call. Key tools:
 `cancel_task`, `request_review`, `switch_model`, `send_owner_message`,
 `update_identity`, `toggle_evolution`, `toggle_consciousness`,
 `forward_to_worker` (forward message to a specific worker task)
+
+If the creator asks for an Excel-ready table, CSV/TSV export, or any result
+that would be long in chat, write it to Drive with `drive_write` and send it
+as a Telegram document with `send_file`. In chat, give only a short preview
+and say the file is attached.
 
 New tools: module in `ouroboros/tools/`, export `get_tools()`.
 The registry discovers them automatically.

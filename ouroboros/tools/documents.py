@@ -16,7 +16,7 @@ import urllib.parse
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Tuple
 from xml.etree import ElementTree as ET
 
 import requests
@@ -50,6 +50,18 @@ class ExtractedDocument:
     metadata: Dict[str, str] = field(default_factory=dict)
     sections: List[Tuple[str, str]] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+
+
+ProgressFn = Callable[[str], None]
+
+
+def _emit_progress(progress: ProgressFn | None, text: str) -> None:
+    if progress is None:
+        return
+    try:
+        progress(text)
+    except Exception:
+        pass
 
 
 def _clean_limit(value: int, default: int, minimum: int, maximum: int) -> int:
@@ -151,7 +163,11 @@ def _try_import_pdf_reader():
         return None, ""
 
 
-def _extract_pdf_with_python(path: Path, max_pages: int) -> ExtractedDocument | None:
+def _extract_pdf_with_python(
+    path: Path,
+    max_pages: int,
+    progress: ProgressFn | None = None,
+) -> ExtractedDocument | None:
     PdfReader, library = _try_import_pdf_reader()
     if PdfReader is None:
         return None
@@ -165,8 +181,15 @@ def _extract_pdf_with_python(path: Path, max_pages: int) -> ExtractedDocument | 
             warnings.append("PDF is encrypted and could not be decrypted with an empty password.")
 
     total_pages = len(reader.pages)
+    pages_to_extract = min(total_pages, max_pages)
+    _emit_progress(
+        progress,
+        f"Открыл PDF `{path.name}`: {total_pages} стр. Извлекаю текст из первых {pages_to_extract} стр.; если текста много, это может занять пару минут.",
+    )
     sections: List[Tuple[str, str]] = []
-    for idx in range(1, min(total_pages, max_pages) + 1):
+    for idx in range(1, pages_to_extract + 1):
+        if idx == 1 or idx == pages_to_extract or idx % 10 == 0:
+            _emit_progress(progress, f"Читаю PDF `{path.name}`: страница {idx}/{pages_to_extract}.")
         page = reader.pages[idx - 1]
         try:
             text = page.extract_text() or ""
@@ -185,7 +208,12 @@ def _extract_pdf_with_python(path: Path, max_pages: int) -> ExtractedDocument | 
     )
 
 
-def _extract_pdf_with_pdftotext(path: Path, max_pages: int) -> ExtractedDocument | None:
+def _extract_pdf_with_pdftotext(
+    path: Path,
+    max_pages: int,
+    progress: ProgressFn | None = None,
+) -> ExtractedDocument | None:
+    _emit_progress(progress, f"Извлекаю текст из PDF `{path.name}` через pdftotext, до {max_pages} стр.")
     try:
         proc = subprocess.run(
             ["pdftotext", "-layout", "-f", "1", "-l", str(max_pages), str(path), "-"],
@@ -211,12 +239,12 @@ def _extract_pdf_with_pdftotext(path: Path, max_pages: int) -> ExtractedDocument
     )
 
 
-def _extract_pdf(path: Path, max_pages: int) -> ExtractedDocument:
-    extracted = _extract_pdf_with_python(path, max_pages)
+def _extract_pdf(path: Path, max_pages: int, progress: ProgressFn | None = None) -> ExtractedDocument:
+    extracted = _extract_pdf_with_python(path, max_pages, progress=progress)
     if extracted is not None:
         return extracted
 
-    extracted = _extract_pdf_with_pdftotext(path, max_pages)
+    extracted = _extract_pdf_with_pdftotext(path, max_pages, progress=progress)
     if extracted is not None:
         return extracted
 
@@ -258,7 +286,7 @@ def _number_from_name(name: str) -> int:
     return int(match.group(1))
 
 
-def _extract_pptx(path: Path, max_slides: int) -> ExtractedDocument:
+def _extract_pptx(path: Path, max_slides: int, progress: ProgressFn | None = None) -> ExtractedDocument:
     warnings: List[str] = []
     sections: List[Tuple[str, str]] = []
     with zipfile.ZipFile(path) as zf:
@@ -273,7 +301,14 @@ def _extract_pptx(path: Path, max_slides: int) -> ExtractedDocument:
             if re.fullmatch(r"ppt/notesSlides/notesSlide\d+\.xml", name)
         }
 
+        slides_to_extract = min(len(slides), max_slides)
+        _emit_progress(
+            progress,
+            f"Открыл презентацию `{path.name}`: {len(slides)} слайдов. Извлекаю текст из {slides_to_extract} слайдов.",
+        )
         for idx, slide_name in enumerate(slides[:max_slides], start=1):
+            if idx == 1 or idx == slides_to_extract or idx % 20 == 0:
+                _emit_progress(progress, f"Читаю презентацию `{path.name}`: слайд {idx}/{slides_to_extract}.")
             slide_num = _number_from_name(slide_name)
             try:
                 slide_lines = _paragraphs_from_xml(_read_zip_xml(zf, slide_name))
@@ -308,7 +343,8 @@ def _extract_pptx(path: Path, max_slides: int) -> ExtractedDocument:
     )
 
 
-def _extract_docx(path: Path) -> ExtractedDocument:
+def _extract_docx(path: Path, progress: ProgressFn | None = None) -> ExtractedDocument:
+    _emit_progress(progress, f"Открыл DOCX `{path.name}`. Извлекаю основной текст документа.")
     with zipfile.ZipFile(path) as zf:
         try:
             paragraphs = _paragraphs_from_xml(_read_zip_xml(zf, "word/document.xml"))
@@ -321,7 +357,13 @@ def _extract_docx(path: Path) -> ExtractedDocument:
     )
 
 
-def _extract_zip(path: Path, max_pages: int, max_slides: int, max_archive_files: int) -> ExtractedDocument:
+def _extract_zip(
+    path: Path,
+    max_pages: int,
+    max_slides: int,
+    max_archive_files: int,
+    progress: ProgressFn | None = None,
+) -> ExtractedDocument:
     warnings: List[str] = []
     sections: List[Tuple[str, str]] = []
     analyzed = 0
@@ -329,6 +371,8 @@ def _extract_zip(path: Path, max_pages: int, max_slides: int, max_archive_files:
     total_uncompressed = 0
     listed: List[str] = []
     scan_infos: List[zipfile.ZipInfo] = []
+
+    _emit_progress(progress, f"Открыл ZIP `{path.name}`. Смотрю, какие документы лежат внутри.")
 
     with zipfile.ZipFile(path) as zf:
         infos = [info for info in zf.infolist() if not info.is_dir()]
@@ -344,6 +388,16 @@ def _extract_zip(path: Path, max_pages: int, max_slides: int, max_archive_files:
                 break
             listed.append(f"{safe_name} ({info.file_size} bytes)")
             scan_infos.append(info)
+
+        supported_count = sum(
+            1
+            for info in scan_infos
+            if Path(_zip_member_safe_name(info.filename)).suffix.lower() in DOCUMENT_EXTENSIONS - ARCHIVE_EXTENSIONS
+        )
+        _emit_progress(
+            progress,
+            f"В архиве `{path.name}`: {len(infos)} файлов, для анализа подходит {supported_count}. Начинаю извлекать текст.",
+        )
 
         with tempfile.TemporaryDirectory(prefix="ouroboros_zip_") as tmp:
             tmp_root = Path(tmp).resolve()
@@ -367,6 +421,11 @@ def _extract_zip(path: Path, max_pages: int, max_slides: int, max_archive_files:
                     warnings.append(f"Skipped oversized archive entry: {safe_name} ({info.file_size} bytes)")
                     continue
 
+                if analyzed < 5:
+                    _emit_progress(progress, f"Нашёл в ZIP `{safe_name}`. Распаковываю и читаю содержимое.")
+                elif analyzed == 5:
+                    _emit_progress(progress, "В архиве ещё есть подходящие документы; продолжаю разбор без лишних сообщений.")
+
                 member_path = (tmp_root / safe_name).resolve()
                 try:
                     member_path.relative_to(tmp_root)
@@ -383,6 +442,7 @@ def _extract_zip(path: Path, max_pages: int, max_slides: int, max_archive_files:
                     max_slides=max_slides,
                     max_archive_files=max_archive_files,
                     allow_archives=False,
+                    progress=progress,
                 )
                 analyzed += 1
                 for warning in extracted.warnings:
@@ -397,6 +457,8 @@ def _extract_zip(path: Path, max_pages: int, max_slides: int, max_archive_files:
         sections.insert(0, ("Archive contents", "\n".join(listed[:200])))
     if skipped:
         warnings.append(f"Skipped {skipped} unsupported, nested, or unsafe archive entries.")
+
+    _emit_progress(progress, f"Разбор ZIP `{path.name}` завершён: проанализировано файлов {analyzed}, пропущено {skipped}.")
 
     return ExtractedDocument(
         kind="zip",
@@ -416,17 +478,25 @@ def _extract_document(
     max_slides: int,
     max_archive_files: int = MAX_ARCHIVE_FILES,
     allow_archives: bool = True,
+    progress: ProgressFn | None = None,
 ) -> ExtractedDocument:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        return _extract_pdf(path, max_pages)
+        return _extract_pdf(path, max_pages, progress=progress)
     if suffix == ".pptx":
-        return _extract_pptx(path, max_slides)
+        return _extract_pptx(path, max_slides, progress=progress)
     if suffix == ".docx":
-        return _extract_docx(path)
+        return _extract_docx(path, progress=progress)
     if suffix == ".zip" and allow_archives:
-        return _extract_zip(path, max_pages=max_pages, max_slides=max_slides, max_archive_files=max_archive_files)
+        return _extract_zip(
+            path,
+            max_pages=max_pages,
+            max_slides=max_slides,
+            max_archive_files=max_archive_files,
+            progress=progress,
+        )
     if suffix in TEXT_EXTENSIONS:
+        _emit_progress(progress, f"Открыл текстовый файл `{path.name}`. Читаю содержимое.")
         return _read_plain_text(path)
     if suffix == ".ppt":
         return ExtractedDocument(
@@ -557,12 +627,19 @@ def _download_url_to_drive(
     output_path: str = "",
     max_bytes: int = MAX_FILE_BYTES,
 ) -> str:
+    _emit_progress(ctx.emit_progress_fn, "Скачиваю файл по ссылке в рабочую папку. Если сервер отдаёт загрузку вместо страницы, я заберу сам файл.")
     parsed = _validate_download_url(url)
     max_bytes = _clean_limit(max_bytes, MAX_FILE_BYTES, 1_000, MAX_FILE_BYTES)
     with requests.get(parsed.geturl(), stream=True, allow_redirects=True, timeout=(10, 60)) as resp:
         resp.raise_for_status()
         content_type = resp.headers.get("content-type", "")
         filename = _filename_from_download(parsed.geturl(), resp.headers.get("content-disposition", ""), content_type)
+        content_length = resp.headers.get("content-length")
+        size_note = ""
+        if content_length and str(content_length).isdigit():
+            size_mb = int(content_length) / (1024 * 1024)
+            size_note = f" Размер около {size_mb:.1f} MB."
+        _emit_progress(ctx.emit_progress_fn, f"Файл найден: `{filename}`.{size_note} Сохраняю в workspace.")
         if output_path and output_path.strip():
             rel = safe_relpath(output_path)
             if rel.endswith("/"):
@@ -588,6 +665,7 @@ def _download_url_to_drive(
                 f.write(chunk)
 
     rel_saved = str(out_path.relative_to(ctx.drive_root.resolve()))
+    _emit_progress(ctx.emit_progress_fn, f"Файл сохранён: `{rel_saved}`. Теперь его можно открыть через `analyze_document`.")
     return (
         "OK: downloaded file\n"
         f"- path: {rel_saved}\n"
@@ -605,6 +683,7 @@ def _extract_archive(
     max_files: int = MAX_ARCHIVE_FILES,
     overwrite: bool = False,
 ) -> str:
+    _emit_progress(ctx.emit_progress_fn, f"Распаковываю архив `{path}` в рабочую папку.")
     archive_path = _resolve_document_path(ctx, path, source)
     if archive_path.suffix.lower() != ".zip":
         raise ValueError("Only .zip archives are supported")
@@ -621,6 +700,8 @@ def _extract_archive(
     skipped: List[str] = []
     total = 0
     with zipfile.ZipFile(archive_path) as zf:
+        file_count = sum(1 for info in zf.infolist() if not info.is_dir())
+        _emit_progress(ctx.emit_progress_fn, f"Открыл ZIP: внутри {file_count} файлов. Безопасно извлекаю до {max_files}.")
         for info in zf.infolist():
             if info.is_dir():
                 continue
@@ -650,6 +731,7 @@ def _extract_archive(
             target.write_bytes(zf.read(info))
             extracted.append(str(target.relative_to(ctx.drive_root.resolve())))
 
+    _emit_progress(ctx.emit_progress_fn, f"Архив распакован: извлечено файлов {len(extracted)}, пропущено {len(skipped)}.")
     lines = [
         "OK: archive extracted",
         f"- archive: {path}",
@@ -686,12 +768,15 @@ def _analyze_document(
     max_archive_files = _clean_limit(max_archive_files, MAX_ARCHIVE_FILES, 1, 200)
 
     document_path = _resolve_document_path(ctx, path, source)
+    _emit_progress(ctx.emit_progress_fn, f"Открыл файл `{document_path.name}`. Определяю тип и готовлю извлечение текста.")
     extracted = _extract_document(
         document_path,
         max_pages=max_pages,
         max_slides=max_slides,
         max_archive_files=max_archive_files,
+        progress=ctx.emit_progress_fn,
     )
+    _emit_progress(ctx.emit_progress_fn, f"Извлечение текста из `{document_path.name}` завершено. Собираю ответ по твоему запросу.")
     return _format_result(document_path, source, extracted, analysis_type, question or "", max_chars)
 
 

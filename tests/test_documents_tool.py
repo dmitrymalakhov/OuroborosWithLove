@@ -7,10 +7,20 @@ from ouroboros.tools.documents import _analyze_document, _extract_archive
 from ouroboros.tools.registry import ToolContext
 
 
-def _ctx(repo_dir: pathlib.Path, drive_root: pathlib.Path, role: str = "admin") -> ToolContext:
+def _ctx(
+    repo_dir: pathlib.Path,
+    drive_root: pathlib.Path,
+    role: str = "admin",
+    progress=None,
+) -> ToolContext:
     repo_dir.mkdir(parents=True, exist_ok=True)
     drive_root.mkdir(parents=True, exist_ok=True)
-    return ToolContext(repo_dir=repo_dir, drive_root=drive_root, user_role=role)
+    return ToolContext(
+        repo_dir=repo_dir,
+        drive_root=drive_root,
+        user_role=role,
+        emit_progress_fn=progress or (lambda _: None),
+    )
 
 
 def test_analyze_document_reads_text_from_drive(tmp_path):
@@ -99,6 +109,29 @@ def test_analyze_document_extracts_supported_files_inside_zip(tmp_path):
     assert "Important issuer disclosure." in result
     assert "notes/info.txt / Text" in result
     assert "SPV list and INN references" in result
+
+
+def test_analyze_document_emits_progress_for_zip(tmp_path):
+    drive = tmp_path / "drive"
+    repo = tmp_path / "repo"
+    drive.mkdir()
+    archive = drive / "reports.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("report.md", "# Report\n\nImportant issuer disclosure.")
+
+    progress = []
+    result = _analyze_document(
+        _ctx(repo, drive, progress=progress.append),
+        path="reports.zip",
+        analysis_type="answer_question",
+        question="What does the archive contain?",
+    )
+
+    assert "type: zip" in result
+    assert any("Открыл файл" in item for item in progress)
+    assert any("Открыл ZIP" in item for item in progress)
+    assert any("Нашёл в ZIP" in item for item in progress)
+    assert any("заверш" in item.lower() for item in progress)
 
 
 def test_extract_archive_writes_safe_files_to_drive(tmp_path):

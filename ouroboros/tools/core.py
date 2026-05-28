@@ -1,10 +1,11 @@
-"""File tools: repo_read, repo_list, drive_read, drive_list, drive_write, codebase_digest, summarize_dialogue."""
+"""File tools: repo_read, repo_list, drive_read, drive_list, drive_write, send_file, codebase_digest, summarize_dialogue."""
 
 from __future__ import annotations
 
 import ast
 import json
 import logging
+import mimetypes
 import os
 import pathlib
 import uuid
@@ -14,6 +15,8 @@ from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import read_text, safe_relpath, utc_now_iso
 
 log = logging.getLogger(__name__)
+
+MAX_SEND_FILE_BYTES = 50 * 1024 * 1024
 
 
 def _scope(ctx: ToolContext) -> dict:
@@ -69,6 +72,57 @@ def _drive_write(ctx: ToolContext, path: str, content: str, mode: str = "overwri
         with p.open("a", encoding="utf-8") as f:
             f.write(content)
     return f"OK: wrote {mode} {path} ({len(content)} chars)"
+
+
+# ---------------------------------------------------------------------------
+# Send file to Telegram
+# ---------------------------------------------------------------------------
+
+def _send_file(
+    ctx: ToolContext,
+    path: str,
+    caption: str = "",
+    filename: str = "",
+    mime_type: str = "",
+) -> str:
+    """Send a file from the user's Drive workspace to the active Telegram chat."""
+    if not ctx.current_chat_id:
+        return "⚠️ No active chat — cannot send file."
+
+    file_path = ctx.drive_path(path)
+    root = ctx.drive_root.resolve()
+    try:
+        file_path.relative_to(root)
+    except ValueError:
+        return "⚠️ Path traversal is not allowed."
+    if not file_path.exists():
+        return f"⚠️ File not found: {path}"
+    if not file_path.is_file():
+        return f"⚠️ Not a file: {path}"
+
+    size = file_path.stat().st_size
+    if size > MAX_SEND_FILE_BYTES:
+        return f"⚠️ File is too large to send: {size} bytes"
+
+    display_name = str(filename or "").strip() or file_path.name
+    detected_mime = str(mime_type or "").strip() or mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+    rel_path = str(file_path.relative_to(root))
+    ctx.pending_events.append({
+        "type": "send_document",
+        "chat_id": ctx.current_chat_id,
+        "path": rel_path,
+        "caption": caption or "",
+        "filename": display_name,
+        "mime_type": detected_mime,
+        **_scope(ctx),
+    })
+    return (
+        "OK: file queued for Telegram delivery\n"
+        f"- path: {rel_path}\n"
+        f"- filename: {display_name}\n"
+        f"- size_bytes: {size}\n"
+        f"- mime_type: {detected_mime}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +425,20 @@ def get_tools() -> List[ToolEntry]:
                 "mode": {"type": "string", "enum": ["overwrite", "append"], "default": "overwrite"},
             }, "required": ["path", "content"]},
         }, _drive_write),
+        ToolEntry("send_file", {
+            "name": "send_file",
+            "description": (
+                "Send a file from the user's Drive workspace to the active Telegram chat. "
+                "Use after drive_write when the user asks for an Excel-ready CSV/TSV, report, markdown file, "
+                "or any result that would be too long or inconvenient as a chat message."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string", "description": "File path relative to the user's Drive workspace."},
+                "caption": {"type": "string", "description": "Optional Telegram document caption."},
+                "filename": {"type": "string", "description": "Optional display filename in Telegram."},
+                "mime_type": {"type": "string", "description": "Optional MIME type override, e.g. text/csv."},
+            }, "required": ["path"]},
+        }, _send_file),
         ToolEntry("send_photo", {
             "name": "send_photo",
             "description": (

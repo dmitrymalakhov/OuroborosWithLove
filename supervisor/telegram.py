@@ -134,6 +134,40 @@ class TelegramClient:
                 time.sleep(0.8 * (attempt + 1))
         return False, last_err
 
+    def send_document(
+        self,
+        chat_id: int,
+        file_path: pathlib.Path,
+        caption: str = "",
+        filename: str = "",
+        mime_type: str = "application/octet-stream",
+    ) -> Tuple[bool, str]:
+        """Send a local file to a chat as a Telegram document."""
+        last_err = "unknown"
+        display_name = filename or file_path.name
+        for attempt in range(3):
+            try:
+                with file_path.open("rb") as f:
+                    files = {"document": (display_name, f, mime_type or "application/octet-stream")}
+                    data: Dict[str, Any] = {"chat_id": chat_id}
+                    if caption:
+                        data["caption"] = caption[:1024]
+                    r = requests.post(
+                        f"{self.base}/sendDocument",
+                        data=data, files=files, timeout=90,
+                    )
+                r.raise_for_status()
+                resp = r.json()
+                if resp.get("ok") is True:
+                    return True, "ok"
+                last_err = f"telegram_api_error: {resp}"
+            except Exception as e:
+                last_err = repr(e)
+            if attempt < 2:
+                import time
+                time.sleep(0.8 * (attempt + 1))
+        return False, last_err
+
     def download_file_bytes(self, file_id: str, max_bytes: int = 50_000_000) -> Tuple[Optional[bytes], str, str]:
         """Download a Telegram file and return (bytes, mime_type, telegram_file_path)."""
         try:

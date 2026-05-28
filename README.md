@@ -134,6 +134,7 @@ CFG = {
     "OUROBOROS_MAX_ROUNDS": "200",                               # max LLM rounds per task
     "OUROBOROS_BG_BUDGET_PCT": "10",                             # % of budget for background consciousness
     "OUROBOROS_ADMIN_USER_IDS": "",                               # optional comma-separated Telegram user IDs
+    "OUROBOROS_REQUIRE_USER_APPROVAL": "1",                       # require admin approval for new users
 }
 for k, v in CFG.items():
     os.environ[k] = str(v)
@@ -153,7 +154,7 @@ for k, v in CFG.items():
 
 Open your Telegram bot and send any message. If `OUROBOROS_ADMIN_USER_IDS` is empty, the first person to write becomes the **creator** (owner). If it is set, only those Telegram user IDs can claim admin rights.
 
-Other Telegram users can still talk to the bot. They run in **multi-user mode**: each user gets a separate memory/log workspace under `users/<telegram_user_id>/`, while admin-only tools such as shell, git, evolution, restart, and model switching remain restricted.
+Other Telegram users request access first. Admins receive the request in Telegram and can run `/approve <user_id>`, `/deny <user_id>`, or `/approve all`. Once approved, each user gets a separate memory/log workspace under `users/<telegram_user_id>/`, while admin-only tools such as shell, git, evolution, restart, and model switching remain restricted. Existing users already present in `state/users.json` keep access after upgrade.
 
 You can also send documents directly in Telegram. PDF, ZIP, PPTX, DOCX, and text-like files are saved into the sender's workspace under `uploads/YYYY-MM-DD/` and become available to `analyze_document`. Long document workflows emit progress messages while files are downloaded, unpacked, and parsed.
 
@@ -168,6 +169,9 @@ You can also send documents directly in Telegram. PDF, ZIP, PPTX, DOCX, and text
 | `/panic` | Emergency stop. Kills all workers and halts the process immediately. |
 | `/restart` | Soft restart. Saves state, kills workers, re-launches the process. |
 | `/status` | Shows active workers, task queue, and budget breakdown. |
+| `/access` | List pending user access requests. |
+| `/approve <user_id>` | Approve one or more pending users. Use `/approve all` for bulk approval. |
+| `/deny <user_id>` | Reject a user access request. |
 | `/evolve` | Start autonomous evolution mode (attention! burns money). |
 | `/evolve stop` | Stop evolution mode. Also accepts `/evolve off`. |
 | `/review` | Queue a deep review task (code, understanding, identity). |
@@ -213,9 +217,11 @@ Access is role-aware:
 Ouroboros can serve multiple Telegram users from one bot and one runtime.
 
 - Admin users are defined by `OUROBOROS_ADMIN_USER_IDS` or, if unset, by the first Telegram user who contacts the bot.
-- Regular users get isolated memory, chat history, logs, uploads, task results, and scratchpads.
+- New regular users require admin approval by default. Pending users cannot start agent work until an admin approves them.
+- Regular approved users get isolated memory, chat history, logs, uploads, task results, and scratchpads.
 - Admin-only capabilities stay protected: git operations, shell access, model switching, evolution mode, restart, and review controls.
 - Budget tracking is global, but non-admin budget output is redacted to avoid exposing private spend details.
+- Access commands for admins: `/access` lists pending requests, `/approve <user_id>` approves one or more users, `/deny <user_id>` rejects a request, and `/approve all` approves every pending request.
 
 The user registry is stored at `state/users.json` inside the configured drive/runtime state directory.
 
@@ -272,6 +278,7 @@ Full text: [BIBLE.md](BIBLE.md)
 | `GITHUB_USER` | *(required in config cell)* | GitHub username |
 | `GITHUB_REPO` | `ouroboros` | GitHub repository name |
 | `OUROBOROS_ADMIN_USER_IDS` | *(empty)* | Comma-separated Telegram user IDs with admin privileges |
+| `OUROBOROS_REQUIRE_USER_APPROVAL` | `1` | Require admin approval before new regular users can use the bot |
 | `OUROBOROS_DISABLE_SELF_MODIFICATION` | `0` | Disable repo write/push/restart/evolution tools and allow running without `GITHUB_TOKEN` |
 | `OUROBOROS_BRANCH_DEV` | `ouroboros`; `main` when self-modification is disabled | Runtime branch for development/self-modification |
 | `OUROBOROS_BRANCH_STABLE` | `ouroboros-stable`; `main` when self-modification is disabled | Stable branch used by promotion/restart flows |

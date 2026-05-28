@@ -1,3 +1,4 @@
+import json
 import os
 import pathlib
 import sys
@@ -28,6 +29,7 @@ class TestMultiUserWorkspace(unittest.TestCase):
         self.assertTrue(created)
         self.assertEqual(root, (self.drive_root / "users" / "123").resolve())
         self.assertEqual(rec["role"], "user")
+        self.assertEqual(rec["access_status"], "approved")
         self.assertTrue((root / "memory" / "scratchpad.md").exists())
         self.assertTrue((root / "memory" / "identity.md").exists())
         self.assertTrue((root / "logs" / "chat.jsonl").exists())
@@ -46,7 +48,74 @@ class TestMultiUserWorkspace(unittest.TestCase):
         self.assertTrue(created)
         self.assertEqual(root, self.drive_root)
         self.assertEqual(rec["role"], "admin")
+        self.assertEqual(rec["access_status"], "approved")
         self.assertTrue((self.drive_root / "memory" / "identity.md").exists())
+
+    def test_new_user_access_request_stays_pending_without_workspace(self):
+        from supervisor.users import request_user_access, user_access_status
+
+        rec, created, should_notify = request_user_access(
+            self.drive_root,
+            user_id=123,
+            chat_id=456,
+            from_user={"username": "alice"},
+        )
+
+        self.assertTrue(created)
+        self.assertTrue(should_notify)
+        self.assertEqual(user_access_status(rec), "pending")
+        self.assertFalse((self.drive_root / "users" / "123" / "memory").exists())
+
+    def test_legacy_user_without_access_status_keeps_access(self):
+        from supervisor.users import request_user_access, user_access_status
+
+        users_path = self.drive_root / "state" / "users.json"
+        users_path.parent.mkdir(parents=True)
+        users_path.write_text(json.dumps({
+            "users": {
+                "123": {
+                    "user_id": 123,
+                    "chat_id": 456,
+                    "role": "user",
+                    "drive_root": str(self.drive_root / "users" / "123"),
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                }
+            }
+        }), encoding="utf-8")
+
+        rec, created, should_notify = request_user_access(
+            self.drive_root,
+            user_id=123,
+            chat_id=456,
+            from_user={"username": "alice"},
+        )
+
+        self.assertFalse(created)
+        self.assertFalse(should_notify)
+        self.assertEqual(user_access_status(rec), "approved")
+
+    def test_approve_pending_user_updates_status(self):
+        from supervisor.users import (
+            list_user_records,
+            request_user_access,
+            set_user_access_status,
+            user_access_status,
+        )
+
+        request_user_access(self.drive_root, user_id=123, chat_id=456)
+
+        changes = set_user_access_status(
+            self.drive_root,
+            [123],
+            "approved",
+            decided_by=1,
+        )
+
+        self.assertEqual(changes[0]["old_status"], "pending")
+        self.assertEqual(changes[0]["status"], "approved")
+        approved = list_user_records(self.drive_root, access_status="approved")
+        self.assertEqual([rec["user_id"] for rec in approved], [123])
+        self.assertEqual(user_access_status(approved[0]), "approved")
 
 
 class TestMultiUserTools(unittest.TestCase):

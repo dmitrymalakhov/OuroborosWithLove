@@ -170,6 +170,7 @@ def _parse_admin_user_ids(raw: str) -> Set[int]:
 
 
 ADMIN_USER_IDS = _parse_admin_user_ids(ADMIN_USER_IDS_RAW)
+REQUIRE_USER_APPROVAL = _env_flag("OUROBOROS_REQUIRE_USER_APPROVAL", default=True)
 
 
 def _is_admin_user(user_id: int, st: Dict[str, Any]) -> bool:
@@ -279,7 +280,10 @@ else:
 save_state(_st_admin)
 
 from supervisor.users import (
-    init as users_init, ensure_user_workspace,
+    ACCESS_APPROVED, ACCESS_DENIED, ACCESS_PENDING,
+    init as users_init, ensure_user_workspace, list_user_records,
+    mark_access_request_notified, request_user_access,
+    set_user_access_status, user_access_status,
 )
 users_init(DRIVE_ROOT)
 
@@ -368,6 +372,7 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
     "soft_timeout_sec": SOFT_TIMEOUT_SEC, "hard_timeout_sec": HARD_TIMEOUT_SEC,
     "worker_start_method": str(os.environ.get("OUROBOROS_WORKER_START_METHOD") or ""),
     "disable_self_modification": DISABLE_SELF_MODIFICATION,
+    "require_user_approval": REQUIRE_USER_APPROVAL,
     "diag_heartbeat_sec": DIAG_HEARTBEAT_SEC,
     "diag_slow_cycle_sec": DIAG_SLOW_CYCLE_SEC,
 })
@@ -489,7 +494,242 @@ def _safe_qsize(q: Any) -> int:
         return -1
 
 
-def _handle_supervisor_command(text: str, chat_id: int, tg_offset: int = 0):
+def _access_user_label(rec: Dict[str, Any]) -> str:
+    uid = int(rec.get("user_id") or 0)
+    username = str(rec.get("username") or "").strip()
+    first = str(rec.get("first_name") or "").strip()
+    last = str(rec.get("last_name") or "").strip()
+    name = " ".join(part for part in (first, last) if part).strip()
+    if username and name:
+        return f"{name} (@{username}, id={uid})"
+    if username:
+        return f"@{username} (id={uid})"
+    if name:
+        return f"{name} (id={uid})"
+    return f"id={uid}"
+
+
+def _admin_chat_ids() -> List[int]:
+    st = load_state()
+    chat_ids: List[int] = []
+    owner_chat_id = st.get("owner_chat_id")
+    if owner_chat_id:
+        chat_ids.append(int(owner_chat_id))
+    for rec in list_user_records(DRIVE_ROOT, role="admin"):
+        cid = rec.get("chat_id")
+        if cid:
+            chat_ids.append(int(cid))
+
+    seen: Set[int] = set()
+    unique: List[int] = []
+    for cid in chat_ids:
+        if cid not in seen:
+            unique.append(cid)
+            seen.add(cid)
+    return unique
+
+
+def _send_access_request_to_admins(rec: Dict[str, Any]) -> int:
+    pending_count = len(list_user_records(DRIVE_ROOT, access_status=ACCESS_PENDING))
+    uid = int(rec.get("user_id") or 0)
+    body = (
+        "🔐 Новый запрос доступа к боту\n"
+        f"Пользователь: {_access_user_label(rec)}\n"
+        f"Pending-запросов сейчас: {pending_count}\n\n"
+        f"Согласовать: /approve {uid}\n"
+        f"Отказать: /deny {uid}\n"
+        "Согласовать всех pending: /approve all\n"
+        "Посмотреть очередь: /access"
+    )
+    sent = 0
+    owner_id = int(load_state().get("owner_id") or 0) or None
+    for admin_chat_id in _admin_chat_ids():
+        send_with_budget(
+            admin_chat_id,
+            body,
+            log_drive_root=DRIVE_ROOT,
+            log_user_id=owner_id,
+        )
+        sent += 1
+    return sent
+
+
+def _notify_unnotified_access_requests() -> int:
+    sent = 0
+    for rec in list_user_records(DRIVE_ROOT, access_status=ACCESS_PENDING):
+        if rec.get("access_admin_notified_at"):
+            continue
+        count = _send_access_request_to_admins(rec)
+        if count:
+            mark_access_request_notified(DRIVE_ROOT, int(rec["user_id"]))
+            sent += count
+    return sent
+
+
+def _format_access_records(status: str = ACCESS_PENDING) -> str:
+    records = list_user_records(DRIVE_ROOT, access_status=status)
+    title = {
+        ACCESS_PENDING: "Pending-запросы доступа",
+        ACCESS_APPROVED: "Пользователи с доступом",
+        ACCESS_DENIED: "Пользователи без доступа",
+    }.get(status, "Пользователи")
+    if not records:
+        return f"{title}: пусто."
+
+    lines = [f"{title}: {len(records)}"]
+    for rec in records[:30]:
+        requested_at = rec.get("access_requested_at") or rec.get("created_at") or "-"
+        lines.append(f"- {_access_user_label(rec)} | requested={requested_at}")
+    if len(records) > 30:
+        lines.append(f"... ещё {len(records) - 30}")
+    if status == ACCESS_PENDING:
+        lines.extend([
+            "",
+            "Команды:",
+            "/approve all",
+            "/approve <user_id> [user_id...]",
+            "/deny <user_id> [user_id...]",
+        ])
+    return "\n".join(lines)
+
+
+def _parse_access_user_ids(parts: List[str]) -> List[int]:
+    ids: List[int] = []
+    for part in parts:
+        for raw in str(part).replace(",", " ").split():
+            try:
+                ids.append(int(raw))
+            except Exception:
+                continue
+    seen: Set[int] = set()
+    unique: List[int] = []
+    for uid in ids:
+        if uid not in seen:
+            unique.append(uid)
+            seen.add(uid)
+    return unique
+
+
+def _notify_users_access_decision(results: List[Dict[str, Any]], status: str) -> None:
+    for result in results:
+        if result.get("status") == "missing":
+            continue
+        if result.get("old_status") == result.get("status"):
+            continue
+        rec = result.get("record") or {}
+        chat_id = int(rec.get("chat_id") or 0)
+        uid = int(rec.get("user_id") or 0)
+        if not chat_id or not uid:
+            continue
+
+        if status == ACCESS_APPROVED:
+            user_root, _, _ = ensure_user_workspace(
+                DRIVE_ROOT,
+                uid,
+                chat_id,
+                rec,
+                role="user",
+                use_global_root=False,
+                access_status=ACCESS_APPROVED,
+            )
+            send_with_budget(
+                chat_id,
+                "✅ Доступ к боту предоставлен. Можно писать задачу.",
+                log_drive_root=user_root,
+                log_user_id=uid,
+            )
+        elif status == ACCESS_DENIED:
+            send_with_budget(
+                chat_id,
+                "⛔️ Доступ к боту отклонён администратором.",
+                log_drive_root=DRIVE_ROOT,
+                log_user_id=uid,
+            )
+
+
+def _handle_access_command(text: str, chat_id: int, admin_user_id: int) -> bool:
+    parts = text.strip().split()
+    if not parts:
+        return False
+
+    command = parts[0].lower()
+    aliases = {
+        "/approve": "approve",
+        "/allow": "approve",
+        "/deny": "deny",
+        "/reject": "deny",
+    }
+    action = aliases.get(command)
+    args = parts[1:]
+
+    if command in ("/access", "/requests"):
+        if len(parts) == 1:
+            send_with_budget(chat_id, _format_access_records(ACCESS_PENDING), force_budget=True)
+            return True
+        subcommand = parts[1].lower()
+        if subcommand in ("list", "pending"):
+            send_with_budget(chat_id, _format_access_records(ACCESS_PENDING), force_budget=True)
+            return True
+        if subcommand in ("approved", "users"):
+            send_with_budget(chat_id, _format_access_records(ACCESS_APPROVED), force_budget=True)
+            return True
+        if subcommand in ("denied", "rejected"):
+            send_with_budget(chat_id, _format_access_records(ACCESS_DENIED), force_budget=True)
+            return True
+        if subcommand in ("approve", "allow"):
+            action = "approve"
+            args = parts[2:]
+        elif subcommand in ("deny", "reject"):
+            action = "deny"
+            args = parts[2:]
+        else:
+            send_with_budget(
+                chat_id,
+                "Команды доступа: /access, /approve all, /approve <user_id>, /deny <user_id>",
+                force_budget=True,
+            )
+            return True
+
+    if action not in ("approve", "deny"):
+        return False
+
+    target_status = ACCESS_APPROVED if action == "approve" else ACCESS_DENIED
+    if args and args[0].lower() == "all":
+        user_ids = [int(rec["user_id"]) for rec in list_user_records(DRIVE_ROOT, access_status=ACCESS_PENDING)]
+    else:
+        user_ids = _parse_access_user_ids(args)
+
+    if not user_ids:
+        if target_status == ACCESS_APPROVED:
+            send_with_budget(chat_id, "Нет pending-запросов для согласования.", force_budget=True)
+        else:
+            send_with_budget(chat_id, "Укажи user_id для отказа: /deny <user_id>", force_budget=True)
+        return True
+
+    results = set_user_access_status(
+        DRIVE_ROOT,
+        user_ids,
+        target_status,
+        decided_by=admin_user_id,
+    )
+    _notify_users_access_decision(results, target_status)
+
+    updated = [r for r in results if r.get("status") == target_status and r.get("old_status") != target_status]
+    unchanged = [r for r in results if r.get("status") == target_status and r.get("old_status") == target_status]
+    missing = [r for r in results if r.get("status") == "missing"]
+    verb = "согласовано" if target_status == ACCESS_APPROVED else "отклонено"
+    lines = [f"Доступ: {verb} {len(updated)}."]
+    if unchanged:
+        lines.append(f"Без изменений: {len(unchanged)}.")
+    if missing:
+        lines.append("Не найдены: " + ", ".join(str(r.get("user_id")) for r in missing))
+    pending_left = len(list_user_records(DRIVE_ROOT, access_status=ACCESS_PENDING))
+    lines.append(f"Pending осталось: {pending_left}.")
+    send_with_budget(chat_id, "\n".join(lines), force_budget=True)
+    return True
+
+
+def _handle_supervisor_command(text: str, chat_id: int, user_id: int, tg_offset: int = 0):
     """Handle supervisor slash-commands.
 
     Returns:
@@ -498,6 +738,9 @@ def _handle_supervisor_command(text: str, chat_id: int, tg_offset: int = 0):
         ""    — not a recognized command (falsy, caller falls through)
     """
     lowered = text.strip().lower()
+
+    if _handle_access_command(text, chat_id, user_id):
+        return True
 
     if lowered.startswith("/panic"):
         send_with_budget(chat_id, "🛑 PANIC: stopping everything now.")
@@ -662,14 +905,56 @@ while True:
             )
             log_chat("in", chat_id, user_id, text, drive_root=DRIVE_ROOT)
             send_with_budget(chat_id, "✅ Owner registered. Ouroboros online.")
+            _notify_unnotified_access_requests()
             continue
 
         is_admin = _is_admin_user(user_id, st)
         user_role = "admin" if is_admin else "user"
+        if REQUIRE_USER_APPROVAL and not is_admin:
+            access_rec, access_created, should_notify_admins = request_user_access(
+                DRIVE_ROOT, user_id, chat_id, from_user,
+            )
+            access_status = user_access_status(access_rec)
+            if access_status != ACCESS_APPROVED:
+                request_text = text or caption or "[non-text access request]"
+                log_chat("in", chat_id, user_id, request_text, drive_root=DRIVE_ROOT)
+                append_jsonl(DRIVE_ROOT / "logs" / "events.jsonl", {
+                    "ts": now_iso,
+                    "type": "user_access_request",
+                    "user_id": user_id,
+                    "chat_id": chat_id,
+                    "access_status": access_status,
+                    "created": access_created,
+                })
+                if access_status == ACCESS_PENDING and should_notify_admins:
+                    if _send_access_request_to_admins(access_rec) > 0:
+                        mark_access_request_notified(DRIVE_ROOT, user_id)
+
+                if access_status == ACCESS_PENDING:
+                    reply = (
+                        "🔐 Запрос доступа отправлен администратору. "
+                        "Я напишу здесь, когда доступ будет предоставлен."
+                    )
+                else:
+                    reply = "⛔️ Доступ к боту отклонён администратором."
+                st["last_user_access_request_at"] = now_iso
+                _last_message_ts = time.time()
+                save_state(st)
+                send_with_budget(
+                    chat_id,
+                    reply,
+                    log_drive_root=DRIVE_ROOT,
+                    log_user_id=user_id,
+                )
+                continue
+
         user_drive_root, user_created, _user_record = ensure_user_workspace(
             DRIVE_ROOT, user_id, chat_id, from_user,
             role=user_role, use_global_root=is_admin,
+            access_status=ACCESS_APPROVED,
         )
+        if is_admin:
+            _notify_unnotified_access_requests()
 
         saved_document = None
         document_download_failed = False
@@ -731,7 +1016,7 @@ while True:
         # --- Supervisor commands ---
         if text.strip().lower().startswith("/") and is_admin:
             try:
-                result = _handle_supervisor_command(text, chat_id, tg_offset=offset)
+                result = _handle_supervisor_command(text, chat_id, user_id, tg_offset=offset)
                 if result is True:
                     continue  # terminal command, fully handled
                 elif result:  # non-empty string = dual-path note

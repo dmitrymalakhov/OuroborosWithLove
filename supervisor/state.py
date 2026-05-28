@@ -555,6 +555,13 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: 
     lines.append(f"owner_id: {st.get('owner_id')}")
     lines.append(f"session_id: {st.get('session_id')}")
     lines.append(f"version: {st.get('current_branch')}@{(st.get('current_sha') or '')[:8]}")
+    try:
+        from supervisor.users import ACCESS_PENDING, list_user_records
+        pending_access = len(list_user_records(DRIVE_ROOT, access_status=ACCESS_PENDING))
+        if pending_access:
+            lines.append(f"access_pending: {pending_access}")
+    except Exception:
+        log.debug("Failed to include access request summary in status", exc_info=True)
     busy_count = sum(1 for w in workers_dict.values() if getattr(w, 'busy_task_id', None) is not None)
     lines.append(f"workers: {len(workers_dict)} (busy: {busy_count})")
     lines.append(f"pending: {len(pending_list)}")

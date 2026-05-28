@@ -43,6 +43,7 @@ TOOL_MODULES = [
     "ouroboros.tools.control",
     "ouroboros.tools.browser",
     "ouroboros.tools.documents",
+    "ouroboros.tools.presentations",
     "ouroboros.tools.review",
 ]
 
@@ -92,6 +93,7 @@ EXPECTED_TOOLS = [
     "run_shell", "claude_code_edit",
     "browse_page", "browser_action",
     "analyze_document", "extract_archive", "download_url_to_drive",
+    "create_presentation",
     "web_search",
     "chat_history", "update_scratchpad", "update_identity",
     "request_restart", "promote_to_stable", "request_review",

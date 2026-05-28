@@ -98,6 +98,7 @@ CORE_TOOL_NAMES = {
     "update_scratchpad", "update_identity",
     "chat_history", "web_search",
     "analyze_document", "extract_archive", "download_url_to_drive",
+    "create_presentation",
     "send_owner_message", "switch_model",
     "request_restart", "promote_to_stable",
     "knowledge_read", "knowledge_write",

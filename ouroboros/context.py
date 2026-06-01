@@ -87,7 +87,14 @@ def _build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
         "shared_drive_root": str(getattr(env, "shared_drive_root", None) or env.drive_root),
         "git_head": git_sha,
         "git_branch": git_branch,
-        "task": {"id": task.get("id"), "type": task.get("type")},
+        "task": {
+            "id": task.get("id"),
+            "type": task.get("type"),
+            "chat_type": task.get("chat_type"),
+            "is_team_workspace": bool(task.get("is_team_workspace")),
+            "team_chat_id": task.get("team_chat_id"),
+            "team_slug": task.get("team_slug"),
+        },
     }
     if budget_info:
         runtime_data["budget"] = budget_info
@@ -151,6 +158,43 @@ def _build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[
         sections.append("## Supervisor\n\n" + supervisor_summary)
 
     return sections
+
+
+def _build_team_inbox_section(env: Any, task: Dict[str, Any], limit: int = 20) -> str:
+    if not task.get("is_team_workspace"):
+        return ""
+    path = env.drive_path("inbox/messages.jsonl")
+    if not path.exists():
+        return ""
+    try:
+        rows: List[Dict[str, Any]] = []
+        for line in path.read_text(encoding="utf-8").strip().splitlines()[-limit:]:
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+                if isinstance(obj, dict):
+                    rows.append(obj)
+            except Exception:
+                continue
+    except Exception:
+        log.debug("Failed to read team inbox context", exc_info=True)
+        return ""
+    if not rows:
+        return ""
+    lines = [f"Team workspace: {task.get('team_slug') or ''}".strip()]
+    for row in rows:
+        ts = str(row.get("ts") or "")[:16]
+        topic = str(row.get("topic") or "").strip()
+        sender = row.get("user_id")
+        msg = clip_text(str(row.get("message") or ""), 800)
+        label = f"- [{row.get('id')}] {ts}"
+        if topic:
+            label += f" #{topic}"
+        if sender:
+            label += f" user={sender}"
+        lines.append(f"{label}: {msg}")
+    return "## Team Inbox\n\n" + "\n".join(lines)
 
 
 def _build_health_invariants(env: Any) -> str:
@@ -356,6 +400,10 @@ def build_llm_messages(
         dynamic_parts.append(health_section)
 
     dynamic_parts.extend(_build_recent_sections(memory, env, task_id=task.get("id", "")))
+
+    team_inbox = _build_team_inbox_section(env, task)
+    if team_inbox:
+        dynamic_parts.append(team_inbox)
 
     if str(task.get("type") or "") == "review" and review_context_builder is not None:
         try:

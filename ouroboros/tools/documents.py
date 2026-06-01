@@ -6,14 +6,7 @@ summarize, critique, answer questions, or turn them into tasks.
 
 from __future__ import annotations
 
-import re
-import datetime
-import ipaddress
-import socket
-import subprocess
-import tempfile
-import urllib.parse
-import zipfile
+import datetime, ipaddress, re, socket, subprocess, tempfile, urllib.parse, zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Tuple
@@ -23,7 +16,6 @@ import requests
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import clip_text, safe_relpath
-
 
 DEFAULT_MAX_CHARS = 30_000
 DEFAULT_MAX_PAGES = 25
@@ -43,7 +35,6 @@ ANALYSIS_TYPES = {"summary", "critique", "extract_tasks", "answer_question", "ra
 ARCHIVE_EXTENSIONS = {".zip"}
 DOCUMENT_EXTENSIONS = {".pdf", ".pptx", ".docx", ".ppt"} | TEXT_EXTENSIONS | ARCHIVE_EXTENSIONS
 
-
 @dataclass
 class ExtractedDocument:
     kind: str
@@ -54,7 +45,6 @@ class ExtractedDocument:
 
 ProgressFn = Callable[[str], None]
 
-
 def _emit_progress(progress: ProgressFn | None, text: str) -> None:
     if progress is None:
         return
@@ -62,7 +52,6 @@ def _emit_progress(progress: ProgressFn | None, text: str) -> None:
         progress(text)
     except Exception:
         pass
-
 
 def _clean_limit(value: int, default: int, minimum: int, maximum: int) -> int:
     try:

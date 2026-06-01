@@ -136,6 +136,8 @@ def persist_queue_snapshot(reason: str = "") -> None:
                 "review_source_task_id": t.get("review_source_task_id"),
                 "user_id": t.get("user_id"), "user_role": t.get("user_role"),
                 "drive_root": t.get("drive_root"),
+                "chat_type": t.get("chat_type"), "team_chat_id": t.get("team_chat_id"),
+                "team_slug": t.get("team_slug"), "is_team_workspace": t.get("is_team_workspace"),
             },
         })
     running_rows = []

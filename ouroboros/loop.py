@@ -943,7 +943,6 @@ def _call_llm_with_retry(
 
     return None, 0.0
 
-
 def _process_tool_results(
     results: List[Dict[str, Any]],
     messages: List[Dict[str, Any]],

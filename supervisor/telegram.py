@@ -7,6 +7,7 @@ TelegramClient, message splitting, markdown→HTML conversion, send_with_budget.
 from __future__ import annotations
 
 import datetime
+import json
 import logging
 import pathlib
 import re
@@ -51,15 +52,17 @@ class TelegramClient:
     def __init__(self, token: str):
         self.base = f"https://api.telegram.org/bot{token}"
         self._token = token
+        self._me_cache: Optional[Dict[str, Any]] = None
 
     def get_updates(self, offset: int, timeout: int = 10) -> List[Dict[str, Any]]:
         last_err = "unknown"
         for attempt in range(3):
             try:
+                allowed_updates = ["message", "edited_message", "my_chat_member", "callback_query"]
                 r = requests.get(
                     f"{self.base}/getUpdates",
                     params={"offset": offset, "timeout": timeout,
-                            "allowed_updates": ["message", "edited_message"]},
+                            "allowed_updates": json.dumps(allowed_updates)},
                     timeout=timeout + 5,
                 )
                 r.raise_for_status()
@@ -73,6 +76,18 @@ class TelegramClient:
                     import time
                     time.sleep(0.8 * (attempt + 1))
         raise RuntimeError(f"Telegram getUpdates failed after retries: {last_err}")
+
+    def get_me(self) -> Dict[str, Any]:
+        if self._me_cache is not None:
+            return dict(self._me_cache)
+        r = requests.get(f"{self.base}/getMe", timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("ok") is not True:
+            raise RuntimeError(f"Telegram getMe failed: {data}")
+        result = data.get("result") or {}
+        self._me_cache = dict(result)
+        return dict(result)
 
     def send_message(self, chat_id: int, text: str, parse_mode: str = "") -> Tuple[bool, str]:
         last_err = "unknown"
@@ -93,6 +108,98 @@ class TelegramClient:
             if attempt < 2:
                 import time
                 time.sleep(0.8 * (attempt + 1))
+        return False, last_err
+
+    def send_message_with_markup(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: Dict[str, Any],
+        parse_mode: str = "",
+    ) -> Tuple[bool, str, int]:
+        """Send a message with inline keyboard markup and return message_id."""
+        last_err = "unknown"
+        for attempt in range(3):
+            try:
+                payload: Dict[str, Any] = {
+                    "chat_id": chat_id,
+                    "text": text,
+                    "disable_web_page_preview": True,
+                    "reply_markup": json.dumps(reply_markup, ensure_ascii=False),
+                }
+                if parse_mode:
+                    payload["parse_mode"] = parse_mode
+                r = requests.post(f"{self.base}/sendMessage", data=payload, timeout=30)
+                r.raise_for_status()
+                data = r.json()
+                if data.get("ok") is True:
+                    result = data.get("result") or {}
+                    return True, "ok", int(result.get("message_id") or 0)
+                last_err = f"telegram_api_error: {data}"
+            except Exception as e:
+                last_err = repr(e)
+            if attempt < 2:
+                import time
+                time.sleep(0.8 * (attempt + 1))
+        return False, last_err, 0
+
+    def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        reply_markup: Optional[Dict[str, Any]] = None,
+        parse_mode: str = "",
+    ) -> Tuple[bool, str]:
+        """Best-effort edit of an already sent Telegram message."""
+        last_err = "unknown"
+        for attempt in range(2):
+            try:
+                payload: Dict[str, Any] = {
+                    "chat_id": int(chat_id),
+                    "message_id": int(message_id),
+                    "text": text,
+                    "disable_web_page_preview": True,
+                }
+                if reply_markup is not None:
+                    payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+                if parse_mode:
+                    payload["parse_mode"] = parse_mode
+                r = requests.post(f"{self.base}/editMessageText", data=payload, timeout=15)
+                r.raise_for_status()
+                data = r.json()
+                if data.get("ok") is True:
+                    return True, "ok"
+                last_err = f"telegram_api_error: {data}"
+            except Exception as e:
+                last_err = repr(e)
+            if attempt == 0:
+                import time
+                time.sleep(0.4)
+        return False, last_err
+
+    def answer_callback_query(
+        self,
+        callback_query_id: str,
+        text: str = "",
+        show_alert: bool = False,
+    ) -> Tuple[bool, str]:
+        last_err = "unknown"
+        try:
+            payload: Dict[str, Any] = {
+                "callback_query_id": callback_query_id,
+                "show_alert": bool(show_alert),
+            }
+            if text:
+                payload["text"] = text[:200]
+            r = requests.post(f"{self.base}/answerCallbackQuery", data=payload, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+            if data.get("ok") is True:
+                return True, "ok"
+            last_err = f"telegram_api_error: {data}"
+        except Exception as e:
+            last_err = repr(e)
         return False, last_err
 
     def send_chat_action(self, chat_id: int, action: str = "typing") -> bool:

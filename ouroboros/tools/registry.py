@@ -36,8 +36,12 @@ class ToolContext:
     branch_dev: str = "ouroboros"
     pending_events: List[Dict[str, Any]] = field(default_factory=list)
     current_chat_id: Optional[int] = None
+    chat_type: str = "private"
     current_user_id: Optional[int] = None
     user_role: str = "admin"
+    team_chat_id: Optional[int] = None
+    team_slug: str = ""
+    is_team_workspace: bool = False
     current_task_type: Optional[str] = None
     last_push_succeeded: bool = False
     emit_progress_fn: Callable[[str], None] = field(default=lambda _: None)
@@ -62,7 +66,10 @@ class ToolContext:
     def __post_init__(self) -> None:
         if self.shared_drive_root is None:
             self.shared_drive_root = self.drive_root
+        self.chat_type = str(self.chat_type or "private").lower()
         self.user_role = str(self.user_role or "user").lower()
+        self.team_slug = str(self.team_slug or "")
+        self.is_team_workspace = bool(self.is_team_workspace)
 
     def repo_path(self, rel: str) -> pathlib.Path:
         return (self.repo_dir / safe_relpath(rel)).resolve()
@@ -103,6 +110,7 @@ CORE_TOOL_NAMES = {
     "request_restart", "promote_to_stable",
     "knowledge_read", "knowledge_write",
     "browse_page", "browser_action", "analyze_screenshot",
+    "team_inbox_send", "team_inbox_read", "team_members",
 }
 
 

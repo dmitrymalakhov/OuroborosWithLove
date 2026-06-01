@@ -304,6 +304,32 @@ def mark_access_request_notified(drive_root: pathlib.Path, user_id: int) -> None
         release_file_lock(USERS_LOCK_PATH, lock_fd)
 
 
+def append_access_request_notification(
+    drive_root: pathlib.Path,
+    user_id: int,
+    *,
+    admin_chat_id: int,
+    message_id: int,
+) -> None:
+    init(drive_root)
+    lock_fd = acquire_file_lock(USERS_LOCK_PATH)
+    try:
+        data = _load_users_unlocked()
+        rec = data.setdefault("users", {}).get(_user_key(user_id))
+        if not isinstance(rec, dict):
+            return
+        notifications = rec.setdefault("access_notifications", [])
+        notifications.append({
+            "admin_chat_id": int(admin_chat_id),
+            "message_id": int(message_id),
+            "ts": _now_iso(),
+        })
+        rec["access_admin_notified_at"] = _now_iso()
+        _save_users_unlocked(data)
+    finally:
+        release_file_lock(USERS_LOCK_PATH, lock_fd)
+
+
 def list_user_records(
     drive_root: pathlib.Path,
     *,

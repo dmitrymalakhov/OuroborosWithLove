@@ -45,15 +45,21 @@ TOOL_MODULES = [
     "ouroboros.tools.documents",
     "ouroboros.tools.presentations",
     "ouroboros.tools.review",
+    "ouroboros.tools.team",
 ]
 
 SUPERVISOR_MODULES = [
+    "supervisor.access_control",
+    "supervisor.commands",
     "supervisor.state",
     "supervisor.telegram",
     "supervisor.queue",
     "supervisor.workers",
     "supervisor.git_ops",
     "supervisor.events",
+    "supervisor.teams",
+    "supervisor.teamchat",
+    "supervisor.watchdog",
 ]
 
 
@@ -118,6 +124,8 @@ EXPECTED_TOOLS = [
     "compact_context",
     "list_available_tools",
     "enable_tools",
+    # Team workspaces
+    "team_inbox_send", "team_inbox_read", "team_members",
 ]
 
 

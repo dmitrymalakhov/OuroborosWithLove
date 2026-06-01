@@ -20,10 +20,14 @@ MAX_SUBTASK_DEPTH = 3
 def _scope(ctx: ToolContext) -> dict:
     return {
         "chat_id": ctx.current_chat_id,
+        "chat_type": ctx.chat_type,
         "user_id": ctx.current_user_id,
         "user_role": ctx.user_role,
         "drive_root": str(ctx.drive_root),
         "shared_drive_root": str(ctx.shared_drive_root or ctx.drive_root),
+        "team_chat_id": ctx.team_chat_id,
+        "team_slug": ctx.team_slug,
+        "is_team_workspace": ctx.is_team_workspace,
     }
 
 

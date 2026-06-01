@@ -351,8 +351,12 @@ class OuroborosAgent:
             branch_dev=self.env.branch_dev,
             pending_events=self._pending_events,
             current_chat_id=self._current_chat_id,
+            chat_type=str(task.get("chat_type") or "private"),
             current_user_id=self._current_user_id,
             user_role=self._user_role,
+            team_chat_id=int(task.get("team_chat_id")) if task.get("team_chat_id") is not None else None,
+            team_slug=str(task.get("team_slug") or ""),
+            is_team_workspace=bool(task.get("is_team_workspace")),
             current_task_type=self._current_task_type,
             emit_progress_fn=self._emit_progress,
             task_depth=int(task.get("depth", 0)),
@@ -489,6 +493,10 @@ class OuroborosAgent:
             "user_role": self._user_role,
             "drive_root": str(self.env.drive_root),
             "shared_drive_root": str(self.env.shared_drive_root or self.env.drive_root),
+            "chat_type": getattr(self.tools._ctx, "chat_type", "private"),
+            "team_chat_id": getattr(self.tools._ctx, "team_chat_id", None),
+            "team_slug": getattr(self.tools._ctx, "team_slug", ""),
+            "is_team_workspace": getattr(self.tools._ctx, "is_team_workspace", False),
         }
 
     def _emit_task_results(

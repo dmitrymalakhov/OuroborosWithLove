@@ -161,6 +161,10 @@ def handle_chat_direct(
     user_id: Optional[int] = None,
     user_role: str = "admin",
     drive_root: Optional[Union[str, pathlib.Path]] = None,
+    chat_type: str = "private",
+    team_chat_id: Optional[int] = None,
+    team_slug: str = "",
+    is_team_workspace: bool = False,
 ) -> None:
     try:
         effective_root = pathlib.Path(drive_root) if drive_root is not None else DRIVE_ROOT
@@ -175,6 +179,10 @@ def handle_chat_direct(
             "user_id": user_id,
             "user_role": role,
             "drive_root": str(effective_root),
+            "chat_type": str(chat_type or "private"),
+            "team_chat_id": team_chat_id,
+            "team_slug": str(team_slug or ""),
+            "is_team_workspace": bool(is_team_workspace),
         }
         if image_data:
             # image_data is (base64, mime) or (base64, mime, caption)

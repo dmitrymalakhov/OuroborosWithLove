@@ -373,6 +373,10 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             "id": tid, "type": "task", "chat_id": chat_id, "text": text,
             "depth": depth, "user_id": user_id, "user_role": user_role,
             "drive_root": drive_root,
+            "chat_type": str(evt.get("chat_type") or "private"),
+            "team_chat_id": evt.get("team_chat_id"),
+            "team_slug": str(evt.get("team_slug") or ""),
+            "is_team_workspace": bool(evt.get("is_team_workspace")),
         }
         if parent_id:
             task["parent_task_id"] = parent_id

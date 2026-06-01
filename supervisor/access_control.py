@@ -1,0 +1,703 @@
+"""Supervisor access approval UI and admin command helpers."""
+
+from __future__ import annotations
+
+import pathlib
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from supervisor.teams import (
+    TEAM_APPROVED as TEAM_CHAT_APPROVED,
+    TEAM_DENIED as TEAM_CHAT_DENIED,
+    TEAM_PENDING as TEAM_CHAT_PENDING,
+    list_team_chats,
+)
+from supervisor.users import (
+    ACCESS_APPROVED,
+    ACCESS_DENIED,
+    ACCESS_PENDING,
+    append_access_request_notification,
+    ensure_user_workspace,
+    list_user_records,
+    mark_access_request_notified,
+    set_user_access_status,
+)
+
+
+def access_user_label(rec: Dict[str, Any]) -> str:
+    uid = int(rec.get("user_id") or 0)
+    username = str(rec.get("username") or "").strip()
+    first = str(rec.get("first_name") or "").strip()
+    last = str(rec.get("last_name") or "").strip()
+    name = " ".join(part for part in (first, last) if part).strip()
+    if username and name:
+        return f"{name} (@{username}, id={uid})"
+    if username:
+        return f"@{username} (id={uid})"
+    if name:
+        return f"{name} (id={uid})"
+    return f"id={uid}"
+
+
+def parse_access_user_ids(parts: List[str]) -> List[int]:
+    ids: List[int] = []
+    for part in parts:
+        for raw in str(part).replace(",", " ").split():
+            try:
+                ids.append(int(raw))
+            except Exception:
+                continue
+    seen: set[int] = set()
+    unique: List[int] = []
+    for uid in ids:
+        if uid not in seen:
+            unique.append(uid)
+            seen.add(uid)
+    return unique
+
+
+def access_request_keyboard(user_id: int) -> Dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Разрешить", "callback_data": f"access:approve:{int(user_id)}"},
+                {"text": "⛔️ Отказать", "callback_data": f"access:deny:{int(user_id)}"},
+            ],
+            [{"text": "🛠 Админ-меню", "callback_data": "admin:home"}],
+        ]
+    }
+
+
+def access_decision_text(rec: Dict[str, Any]) -> str:
+    status = str(rec.get("access_status") or ACCESS_PENDING)
+    decided_by = rec.get("access_decided_by")
+    if status == ACCESS_APPROVED:
+        verdict = "✅ Доступ предоставлен"
+    elif status == ACCESS_DENIED:
+        verdict = "⛔️ Доступ отклонён"
+    else:
+        verdict = "⏳ Ожидает решения"
+    suffix = f"\nРешил admin user_id={decided_by}" if decided_by else ""
+    return f"{verdict}: {access_user_label(rec)}{suffix}"
+
+
+def _short_button_label(value: str, limit: int = 36) -> str:
+    value = " ".join(str(value or "").split()).strip()
+    if len(value) <= limit:
+        return value
+    return value[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _team_chat_label(rec: Dict[str, Any]) -> str:
+    title = str(rec.get("title") or "").strip() or "(без названия)"
+    chat_id = int(rec.get("chat_id") or 0)
+    status = str(rec.get("status") or TEAM_CHAT_PENDING)
+    return f"{title} (chat_id={chat_id}, status={status})"
+
+
+def collect_admin_chat_ids(drive_root: pathlib.Path, load_state_fn: Callable[[], Dict[str, Any]]) -> List[int]:
+    state = load_state_fn()
+    chat_ids: List[int] = []
+    owner_chat_id = state.get("owner_chat_id")
+    if owner_chat_id:
+        chat_ids.append(int(owner_chat_id))
+    for rec in list_user_records(drive_root, role="admin"):
+        chat_id = rec.get("chat_id")
+        if chat_id:
+            chat_ids.append(int(chat_id))
+
+    seen: set[int] = set()
+    unique: List[int] = []
+    for chat_id in chat_ids:
+        if chat_id not in seen:
+            unique.append(chat_id)
+            seen.add(chat_id)
+    return unique
+
+
+@dataclass
+class AccessRuntime:
+    drive_root: pathlib.Path
+    admin_chat_ids_fn: Callable[[], List[int]]
+    load_state_fn: Callable[[], Dict[str, Any]]
+    send_with_budget_fn: Callable[..., Any]
+    tg: Any = None
+    is_admin_user_fn: Optional[Callable[[int, Dict[str, Any]], bool]] = None
+    log_chat_fn: Optional[Callable[..., Any]] = None
+    append_jsonl_fn: Optional[Callable[..., Any]] = None
+
+    def _log_admin_out(self, chat_id: int, text: str) -> None:
+        if not self.log_chat_fn:
+            return
+        owner_id = int(self.load_state_fn().get("owner_id") or 0)
+        self.log_chat_fn("out", chat_id, owner_id, text, drive_root=self.drive_root)
+
+    def _log_error(self, event_type: str, payload: Dict[str, Any]) -> None:
+        if not self.append_jsonl_fn:
+            return
+        try:
+            import datetime
+
+            row = {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": event_type,
+            }
+            row.update(payload)
+            self.append_jsonl_fn(self.drive_root / "logs" / "supervisor.jsonl", row)
+        except Exception:
+            pass
+
+    def _send_markup_or_text(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: Dict[str, Any],
+        *,
+        force_budget: bool = False,
+    ) -> Tuple[bool, int]:
+        if self.tg is not None:
+            ok, err, message_id = self.tg.send_message_with_markup(chat_id, text, reply_markup)
+            if ok:
+                self._log_admin_out(chat_id, text)
+                return True, int(message_id or 0)
+            self._log_error("access_admin_markup_send_failed", {
+                "chat_id": int(chat_id),
+                "error": err,
+            })
+
+        self.send_with_budget_fn(chat_id, text, force_budget=force_budget)
+        return True, 0
+
+    def _edit_or_send_callback_view(
+        self,
+        callback_query: Dict[str, Any],
+        text: str,
+        reply_markup: Dict[str, Any],
+    ) -> None:
+        message = callback_query.get("message") or {}
+        message_chat = message.get("chat") or {}
+        message_chat_id = int(message_chat.get("id") or 0)
+        message_id = int(message.get("message_id") or 0)
+        if self.tg is not None and message_chat_id and message_id:
+            ok, err = self.tg.edit_message_text(message_chat_id, message_id, text, reply_markup=reply_markup)
+            if ok:
+                return
+            self._log_error("admin_menu_edit_failed", {
+                "chat_id": message_chat_id,
+                "message_id": message_id,
+                "error": err,
+            })
+        if message_chat_id:
+            self._send_markup_or_text(message_chat_id, text, reply_markup, force_budget=True)
+
+    def _answer_callback(self, callback_query: Dict[str, Any], text: str = "", show_alert: bool = False) -> None:
+        callback_id = str(callback_query.get("id") or "")
+        if callback_id and self.tg is not None:
+            self.tg.answer_callback_query(callback_id, text, show_alert=show_alert)
+
+    def _callback_admin_user_id(self, callback_query: Dict[str, Any]) -> int:
+        from_user = callback_query.get("from") or {}
+        return int(from_user.get("id") or 0)
+
+    def _ensure_callback_admin(self, callback_query: Dict[str, Any]) -> Tuple[bool, int]:
+        user_id = self._callback_admin_user_id(callback_query)
+        if self.is_admin_user_fn is None:
+            return True, user_id
+        if self.is_admin_user_fn(user_id, self.load_state_fn()):
+            return True, user_id
+        self._answer_callback(
+            callback_query,
+            "Только админ Ouroboros может управлять доступами.",
+            show_alert=True,
+        )
+        return False, user_id
+
+    def send_request_to_admins(self, rec: Dict[str, Any]) -> int:
+        pending_count = len(list_user_records(self.drive_root, access_status=ACCESS_PENDING))
+        uid = int(rec.get("user_id") or 0)
+        body = (
+            "🔐 Новый запрос доступа к боту\n"
+            f"Пользователь: {access_user_label(rec)}\n"
+            f"Pending-запросов сейчас: {pending_count}\n\n"
+            f"Согласовать: /approve {uid}\n"
+            f"Отказать: /deny {uid}\n"
+            "Согласовать всех pending: /approve all\n"
+            "Посмотреть очередь: /access"
+        )
+        sent = 0
+        owner_id = int(self.load_state_fn().get("owner_id") or 0) or None
+        for admin_chat_id in self.admin_chat_ids_fn():
+            if self.tg is not None:
+                ok, err, message_id = self.tg.send_message_with_markup(
+                    admin_chat_id,
+                    body,
+                    access_request_keyboard(uid),
+                )
+                if ok:
+                    append_access_request_notification(
+                        self.drive_root,
+                        uid,
+                        admin_chat_id=admin_chat_id,
+                        message_id=message_id,
+                    )
+                    self._log_admin_out(admin_chat_id, body)
+                    sent += 1
+                else:
+                    self._log_error("user_access_admin_notify_failed", {
+                        "user_id": uid,
+                        "admin_chat_id": int(admin_chat_id),
+                        "error": err,
+                    })
+                continue
+
+            self.send_with_budget_fn(
+                admin_chat_id,
+                body,
+                log_drive_root=self.drive_root,
+                log_user_id=owner_id,
+            )
+            sent += 1
+        return sent
+
+    def notify_unnotified_requests(self) -> int:
+        sent = 0
+        for rec in list_user_records(self.drive_root, access_status=ACCESS_PENDING):
+            has_inline_notification = bool(rec.get("access_notifications"))
+            if rec.get("access_admin_notified_at") and (self.tg is None or has_inline_notification):
+                continue
+            count = self.send_request_to_admins(rec)
+            if count:
+                mark_access_request_notified(self.drive_root, int(rec["user_id"]))
+                sent += count
+        return sent
+
+    def mark_request_notified(self, user_id: int) -> None:
+        mark_access_request_notified(self.drive_root, user_id)
+
+    def format_records(self, status: str = ACCESS_PENDING) -> str:
+        records = list_user_records(self.drive_root, access_status=status)
+        title = {
+            ACCESS_PENDING: "Pending-запросы доступа",
+            ACCESS_APPROVED: "Пользователи с доступом",
+            ACCESS_DENIED: "Пользователи без доступа",
+        }.get(status, "Пользователи")
+        if not records:
+            return f"{title}: пусто."
+
+        lines = [f"{title}: {len(records)}"]
+        for rec in records[:30]:
+            requested_at = rec.get("access_requested_at") or rec.get("created_at") or "-"
+            lines.append(f"- {access_user_label(rec)} | requested={requested_at}")
+        if len(records) > 30:
+            lines.append(f"... ещё {len(records) - 30}")
+        if status == ACCESS_PENDING:
+            lines.extend([
+                "",
+                "Команды:",
+                "/approve all",
+                "/approve <user_id> [user_id...]",
+                "/deny <user_id> [user_id...]",
+            ])
+        return "\n".join(lines)
+
+    def format_admin_home(self) -> str:
+        user_pending = len(list_user_records(self.drive_root, access_status=ACCESS_PENDING))
+        user_approved = len(list_user_records(self.drive_root, access_status=ACCESS_APPROVED))
+        user_denied = len(list_user_records(self.drive_root, access_status=ACCESS_DENIED))
+        group_pending = len(list_team_chats(self.drive_root, status=TEAM_CHAT_PENDING))
+        group_approved = len(list_team_chats(self.drive_root, status=TEAM_CHAT_APPROVED))
+        group_denied = len(list_team_chats(self.drive_root, status=TEAM_CHAT_DENIED))
+        return (
+            "🛠 Админ-меню Ouroboros\n\n"
+            f"Пользователи: pending {user_pending}, approved {user_approved}, denied {user_denied}\n"
+            f"Группы: pending {group_pending}, approved {group_approved}, denied {group_denied}\n\n"
+            "Выбери раздел ниже."
+        )
+
+    def admin_home_keyboard(self) -> Dict[str, Any]:
+        user_pending = len(list_user_records(self.drive_root, access_status=ACCESS_PENDING))
+        user_approved = len(list_user_records(self.drive_root, access_status=ACCESS_APPROVED))
+        user_denied = len(list_user_records(self.drive_root, access_status=ACCESS_DENIED))
+        group_pending = len(list_team_chats(self.drive_root, status=TEAM_CHAT_PENDING))
+        group_approved = len(list_team_chats(self.drive_root, status=TEAM_CHAT_APPROVED))
+        group_denied = len(list_team_chats(self.drive_root, status=TEAM_CHAT_DENIED))
+        return {
+            "inline_keyboard": [
+                [{"text": f"👤 User requests ({user_pending})", "callback_data": "admin:users:pending"}],
+                [
+                    {"text": f"✅ Users ({user_approved})", "callback_data": "admin:users:approved"},
+                    {"text": f"⛔️ Users ({user_denied})", "callback_data": "admin:users:denied"},
+                ],
+                [{"text": f"👥 Group requests ({group_pending})", "callback_data": "admin:groups:pending"}],
+                [
+                    {"text": f"✅ Groups ({group_approved})", "callback_data": "admin:groups:approved"},
+                    {"text": f"⛔️ Groups ({group_denied})", "callback_data": "admin:groups:denied"},
+                ],
+                [{"text": "🔄 Обновить", "callback_data": "admin:home"}],
+            ]
+        }
+
+    def user_records_keyboard(self, status: str) -> Dict[str, Any]:
+        records = list_user_records(self.drive_root, access_status=status)
+        rows: List[List[Dict[str, str]]] = []
+        for rec in records[:20]:
+            uid = int(rec.get("user_id") or 0)
+            label = _short_button_label(access_user_label(rec))
+            if status == ACCESS_PENDING:
+                rows.append([
+                    {"text": f"✅ {label}", "callback_data": f"access:approve:{uid}"},
+                    {"text": f"⛔️ {label}", "callback_data": f"access:deny:{uid}"},
+                ])
+            elif status == ACCESS_APPROVED:
+                rows.append([{"text": f"⛔️ Отключить {label}", "callback_data": f"access:deny:{uid}"}])
+            else:
+                rows.append([{"text": f"✅ Разрешить {label}", "callback_data": f"access:approve:{uid}"}])
+        rows.extend([
+            [
+                {"text": "Pending", "callback_data": "admin:users:pending"},
+                {"text": "Approved", "callback_data": "admin:users:approved"},
+                {"text": "Denied", "callback_data": "admin:users:denied"},
+            ],
+            [{"text": "⬅️ Назад", "callback_data": "admin:home"}],
+        ])
+        return {"inline_keyboard": rows}
+
+    def format_team_records(self, status: str) -> str:
+        records = list_team_chats(self.drive_root, status=status)
+        title = {
+            TEAM_CHAT_PENDING: "Группы ожидают approval",
+            TEAM_CHAT_APPROVED: "Разрешённые группы",
+            TEAM_CHAT_DENIED: "Запрещённые группы",
+        }.get(status, "Группы")
+        if not records:
+            return f"{title}: пусто."
+        lines = [f"{title}: {len(records)}"]
+        for rec in records[:30]:
+            lines.append(f"- {_team_chat_label(rec)}")
+        if len(records) > 30:
+            lines.append(f"... ещё {len(records) - 30}")
+        return "\n".join(lines)
+
+    def team_records_keyboard(self, status: str) -> Dict[str, Any]:
+        records = list_team_chats(self.drive_root, status=status)
+        rows: List[List[Dict[str, str]]] = []
+        for rec in records[:20]:
+            chat_id = int(rec.get("chat_id") or 0)
+            label = _short_button_label(str(rec.get("title") or chat_id))
+            if status == TEAM_CHAT_PENDING:
+                rows.append([
+                    {"text": f"✅ {label}", "callback_data": f"teamchat:approve:{chat_id}"},
+                    {"text": f"⛔️ {label}", "callback_data": f"teamchat:deny:{chat_id}"},
+                ])
+            elif status == TEAM_CHAT_APPROVED:
+                rows.append([{"text": f"⛔️ Запретить {label}", "callback_data": f"teamchat:deny:{chat_id}:force"}])
+            else:
+                rows.append([{"text": f"✅ Разрешить {label}", "callback_data": f"teamchat:approve:{chat_id}:force"}])
+        rows.extend([
+            [
+                {"text": "Pending", "callback_data": "admin:groups:pending"},
+                {"text": "Approved", "callback_data": "admin:groups:approved"},
+                {"text": "Denied", "callback_data": "admin:groups:denied"},
+            ],
+            [{"text": "⬅️ Назад", "callback_data": "admin:home"}],
+        ])
+        return {"inline_keyboard": rows}
+
+    def send_admin_home(self, chat_id: int) -> None:
+        self._send_markup_or_text(
+            chat_id,
+            self.format_admin_home(),
+            self.admin_home_keyboard(),
+            force_budget=True,
+        )
+
+    def send_user_admin_view(self, chat_id: int, status: str) -> None:
+        self._send_markup_or_text(
+            chat_id,
+            self.format_records(status),
+            self.user_records_keyboard(status),
+            force_budget=True,
+        )
+
+    def send_group_admin_view(self, chat_id: int, status: str) -> None:
+        self._send_markup_or_text(
+            chat_id,
+            self.format_team_records(status),
+            self.team_records_keyboard(status),
+            force_budget=True,
+        )
+
+    def edit_access_notifications(self, rec: Dict[str, Any]) -> None:
+        if self.tg is None:
+            return
+        text = access_decision_text(rec)
+        for item in rec.get("access_notifications") or []:
+            try:
+                admin_chat_id = int(item.get("admin_chat_id") or 0)
+                message_id = int(item.get("message_id") or 0)
+                if admin_chat_id and message_id:
+                    self.tg.edit_message_text(admin_chat_id, message_id, text)
+            except Exception:
+                continue
+
+    def decide_user(
+        self,
+        user_id: int,
+        target_status: str,
+        admin_user_id: int,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        results = set_user_access_status(
+            self.drive_root,
+            [user_id],
+            target_status,
+            decided_by=admin_user_id,
+        )
+        self.notify_users_decision(results, target_status)
+        result = results[0] if results else {"status": "missing", "record": {}}
+        if result.get("status") == "missing":
+            return False, f"Пользователь {user_id} не найден.", {}
+        rec = result.get("record") or {}
+        self.edit_access_notifications(rec)
+        old_status = result.get("old_status")
+        actual_status = result.get("status")
+        if actual_status != target_status:
+            msg = f"Нельзя изменить: {access_decision_text(rec)}"
+        elif old_status == target_status:
+            msg = f"Уже {target_status}: {access_user_label(rec)}"
+        elif target_status == ACCESS_APPROVED:
+            msg = f"Доступ предоставлен: {access_user_label(rec)}"
+        else:
+            msg = f"Доступ отклонён: {access_user_label(rec)}"
+        return True, msg, rec
+
+    def notify_users_decision(self, results: List[Dict[str, Any]], status: str) -> None:
+        for result in results:
+            if result.get("status") == "missing":
+                continue
+            if result.get("old_status") == result.get("status"):
+                continue
+            rec = result.get("record") or {}
+            chat_id = int(rec.get("chat_id") or 0)
+            uid = int(rec.get("user_id") or 0)
+            if not chat_id or not uid:
+                continue
+
+            if status == ACCESS_APPROVED:
+                user_root, _, _ = ensure_user_workspace(
+                    self.drive_root,
+                    uid,
+                    chat_id,
+                    rec,
+                    role="user",
+                    use_global_root=False,
+                    access_status=ACCESS_APPROVED,
+                )
+                self.send_with_budget_fn(
+                    chat_id,
+                    "✅ Доступ к боту предоставлен. Можно писать задачу.",
+                    log_drive_root=user_root,
+                    log_user_id=uid,
+                )
+            elif status == ACCESS_DENIED:
+                self.send_with_budget_fn(
+                    chat_id,
+                    "⛔️ Доступ к боту отклонён администратором.",
+                    log_drive_root=self.drive_root,
+                    log_user_id=uid,
+                )
+
+    def handle_command(self, text: str, chat_id: int, admin_user_id: int) -> bool:
+        parts = text.strip().split()
+        if not parts:
+            return False
+
+        command = parts[0].lower()
+        user_status_aliases = {
+            "pending": ACCESS_PENDING,
+            "requests": ACCESS_PENDING,
+            "approved": ACCESS_APPROVED,
+            "users": ACCESS_APPROVED,
+            "denied": ACCESS_DENIED,
+            "rejected": ACCESS_DENIED,
+        }
+        group_status_aliases = {
+            "pending": TEAM_CHAT_PENDING,
+            "requests": TEAM_CHAT_PENDING,
+            "approved": TEAM_CHAT_APPROVED,
+            "denied": TEAM_CHAT_DENIED,
+            "rejected": TEAM_CHAT_DENIED,
+        }
+
+        if command == "/admin":
+            if len(parts) == 1:
+                self.send_admin_home(chat_id)
+                return True
+            section = parts[1].lower()
+            status_name = parts[2].lower() if len(parts) > 2 else "pending"
+            if section in ("users", "user", "access"):
+                self.send_user_admin_view(chat_id, user_status_aliases.get(status_name, ACCESS_PENDING))
+                return True
+            if section in ("groups", "group", "teamchat", "teams"):
+                self.send_group_admin_view(chat_id, group_status_aliases.get(status_name, TEAM_CHAT_PENDING))
+                return True
+            self.send_admin_home(chat_id)
+            return True
+
+        aliases = {
+            "/approve": "approve",
+            "/allow": "approve",
+            "/deny": "deny",
+            "/reject": "deny",
+        }
+        action = aliases.get(command)
+        args = parts[1:]
+
+        if command in ("/access", "/requests"):
+            if len(parts) == 1:
+                self.send_with_budget_fn(chat_id, self.format_records(ACCESS_PENDING), force_budget=True)
+                return True
+            subcommand = parts[1].lower()
+            if subcommand in ("list", "pending"):
+                self.send_with_budget_fn(chat_id, self.format_records(ACCESS_PENDING), force_budget=True)
+                return True
+            if subcommand in ("approved", "users"):
+                self.send_with_budget_fn(chat_id, self.format_records(ACCESS_APPROVED), force_budget=True)
+                return True
+            if subcommand in ("denied", "rejected"):
+                self.send_with_budget_fn(chat_id, self.format_records(ACCESS_DENIED), force_budget=True)
+                return True
+            if subcommand in ("approve", "allow"):
+                action = "approve"
+                args = parts[2:]
+            elif subcommand in ("deny", "reject"):
+                action = "deny"
+                args = parts[2:]
+            else:
+                self.send_with_budget_fn(
+                    chat_id,
+                    "Команды доступа: /access, /approve all, /approve <user_id>, /deny <user_id>",
+                    force_budget=True,
+                )
+                return True
+
+        if action not in ("approve", "deny"):
+            return False
+
+        target_status = ACCESS_APPROVED if action == "approve" else ACCESS_DENIED
+        if args and args[0].lower() == "all":
+            user_ids = [int(rec["user_id"]) for rec in list_user_records(self.drive_root, access_status=ACCESS_PENDING)]
+        else:
+            user_ids = parse_access_user_ids(args)
+
+        if not user_ids:
+            if target_status == ACCESS_APPROVED:
+                self.send_with_budget_fn(chat_id, "Нет pending-запросов для согласования.", force_budget=True)
+            else:
+                self.send_with_budget_fn(chat_id, "Укажи user_id для отказа: /deny <user_id>", force_budget=True)
+            return True
+
+        results = set_user_access_status(
+            self.drive_root,
+            user_ids,
+            target_status,
+            decided_by=admin_user_id,
+        )
+        self.notify_users_decision(results, target_status)
+        for result in results:
+            rec = result.get("record") or {}
+            if rec:
+                self.edit_access_notifications(rec)
+
+        updated = [r for r in results if r.get("status") == target_status and r.get("old_status") != target_status]
+        unchanged = [r for r in results if r.get("status") == target_status and r.get("old_status") == target_status]
+        missing = [r for r in results if r.get("status") == "missing"]
+        verb = "согласовано" if target_status == ACCESS_APPROVED else "отклонено"
+        lines = [f"Доступ: {verb} {len(updated)}."]
+        if unchanged:
+            lines.append(f"Без изменений: {len(unchanged)}.")
+        if missing:
+            lines.append("Не найдены: " + ", ".join(str(r.get("user_id")) for r in missing))
+        pending_left = len(list_user_records(self.drive_root, access_status=ACCESS_PENDING))
+        lines.append(f"Pending осталось: {pending_left}.")
+        self.send_with_budget_fn(chat_id, "\n".join(lines), force_budget=True)
+        return True
+
+    def handle_callback(self, callback_query: Dict[str, Any]) -> bool:
+        data = str(callback_query.get("data") or "")
+        if not (data.startswith("access:") or data.startswith("admin:")):
+            return False
+
+        ok_admin, admin_user_id = self._ensure_callback_admin(callback_query)
+        if not ok_admin:
+            return True
+
+        if data == "admin:home":
+            self._edit_or_send_callback_view(
+                callback_query,
+                self.format_admin_home(),
+                self.admin_home_keyboard(),
+            )
+            self._answer_callback(callback_query, "Админ-меню обновлено.")
+            return True
+
+        if data.startswith("admin:"):
+            parts = data.split(":")
+            if len(parts) != 3:
+                self._answer_callback(callback_query, "Некорректный раздел меню.", show_alert=True)
+                return True
+            section, status_name = parts[1], parts[2]
+            if section == "users":
+                status = {
+                    "pending": ACCESS_PENDING,
+                    "approved": ACCESS_APPROVED,
+                    "denied": ACCESS_DENIED,
+                }.get(status_name)
+                if not status:
+                    self._answer_callback(callback_query, "Некорректный статус пользователей.", show_alert=True)
+                    return True
+                self._edit_or_send_callback_view(
+                    callback_query,
+                    self.format_records(status),
+                    self.user_records_keyboard(status),
+                )
+                self._answer_callback(callback_query, "Пользователи обновлены.")
+                return True
+            if section == "groups":
+                status = {
+                    "pending": TEAM_CHAT_PENDING,
+                    "approved": TEAM_CHAT_APPROVED,
+                    "denied": TEAM_CHAT_DENIED,
+                }.get(status_name)
+                if not status:
+                    self._answer_callback(callback_query, "Некорректный статус групп.", show_alert=True)
+                    return True
+                self._edit_or_send_callback_view(
+                    callback_query,
+                    self.format_team_records(status),
+                    self.team_records_keyboard(status),
+                )
+                self._answer_callback(callback_query, "Группы обновлены.")
+                return True
+            self._answer_callback(callback_query, "Некорректный раздел меню.", show_alert=True)
+            return True
+
+        parts = data.split(":")
+        if len(parts) != 3 or parts[1] not in ("approve", "deny"):
+            self._answer_callback(callback_query, "Некорректная кнопка доступа.", show_alert=True)
+            return True
+        user_ids = parse_access_user_ids([parts[2]])
+        if not user_ids:
+            self._answer_callback(callback_query, "Некорректный user_id.", show_alert=True)
+            return True
+
+        target_status = ACCESS_APPROVED if parts[1] == "approve" else ACCESS_DENIED
+        ok, msg, rec = self.decide_user(user_ids[0], target_status, admin_user_id)
+        self._answer_callback(callback_query, msg, show_alert=not ok)
+
+        message = callback_query.get("message") or {}
+        message_chat = message.get("chat") or {}
+        message_chat_id = int(message_chat.get("id") or 0)
+        message_id = int(message.get("message_id") or 0)
+        if ok and self.tg is not None and message_chat_id and message_id:
+            self.tg.edit_message_text(message_chat_id, message_id, access_decision_text(rec))
+        return True

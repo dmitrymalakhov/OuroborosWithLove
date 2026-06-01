@@ -5,8 +5,8 @@
 # Heavy logic lives in supervisor/ package.
 
 import logging
-import os, sys, json, time, uuid, pathlib, subprocess, datetime, threading, queue as _queue_mod
-from typing import Any, Dict, List, Optional, Set, Tuple
+import os, sys, time, pathlib, subprocess, datetime, threading, queue as _queue_mod
+from typing import Any, Dict, Optional, Set
 
 log = logging.getLogger(__name__)
 
@@ -227,7 +227,7 @@ if not pathlib.Path("/content/drive/MyDrive").exists():
 DRIVE_ROOT = pathlib.Path("/content/drive/MyDrive/Ouroboros").resolve()
 REPO_DIR = pathlib.Path("/content/ouroboros_repo").resolve()
 
-for sub in ["state", "logs", "memory", "index", "locks", "archive", "users"]:
+for sub in ["state", "logs", "memory", "index", "locks", "archive", "users", "teams"]:
     (DRIVE_ROOT / sub).mkdir(parents=True, exist_ok=True)
 REPO_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -286,18 +286,40 @@ else:
 save_state(_st_admin)
 
 from supervisor.users import (
-    ACCESS_APPROVED, ACCESS_DENIED, ACCESS_PENDING,
-    init as users_init, ensure_user_workspace, list_user_records,
-    mark_access_request_notified, request_user_access,
-    set_user_access_status, user_access_status,
+    ACCESS_APPROVED, ACCESS_PENDING,
+    init as users_init, ensure_user_workspace,
+    request_user_access, user_access_status,
 )
 users_init(DRIVE_ROOT)
+
+from supervisor.access_control import AccessRuntime, access_user_label, collect_admin_chat_ids
+from supervisor.commands import SupervisorCommandRuntime, is_admin_only_command
+
+from supervisor.teams import (
+    TEAM_APPROVED, TEAM_DENIED, TEAM_PENDING,
+    ensure_team_workspace,
+    is_group_chat_type,
+    note_team_member_seen, request_team_chat,
+    team_chat_status,
+    team_slug_for_chat,
+    init as teams_init,
+)
+teams_init(DRIVE_ROOT)
+
+from supervisor.teamchat import TeamChatRuntime
 
 from supervisor.telegram import (
     init as telegram_init, TelegramClient, send_with_budget, log_chat,
     save_incoming_document,
 )
 TG = TelegramClient(str(TELEGRAM_BOT_TOKEN))
+try:
+    _BOT_INFO = TG.get_me()
+except Exception:
+    log.warning("Failed to fetch Telegram bot identity; group mention detection will use fallback", exc_info=True)
+    _BOT_INFO = {}
+BOT_ID = int(_BOT_INFO.get("id") or 0)
+BOT_USERNAME = str(_BOT_INFO.get("username") or "").strip().lstrip("@")
 telegram_init(
     drive_root=DRIVE_ROOT,
     total_budget_limit=TOTAL_BUDGET_LIMIT,
@@ -325,6 +347,7 @@ from supervisor.workers import (
     spawn_workers, kill_workers, assign_tasks, ensure_workers_healthy,
     handle_chat_direct, _get_chat_agent, auto_resume_after_restart,
 )
+from supervisor.watchdog import start_chat_watchdog
 workers_init(
     repo_dir=REPO_DIR, drive_root=DRIVE_ROOT, max_workers=MAX_WORKERS,
     soft_timeout=SOFT_TIMEOUT_SEC, hard_timeout=HARD_TIMEOUT_SEC,
@@ -390,54 +413,6 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
 auto_resume_after_restart()
 
 # ----------------------------
-# 6.2) Direct-mode watchdog
-# ----------------------------
-def _chat_watchdog_loop():
-    """Monitor direct-mode chat agent for hangs. Runs as daemon thread."""
-    soft_warned = False
-    while True:
-        time.sleep(30)
-        try:
-            st_watch = load_state()
-            owner_uid = int(st_watch.get("owner_id") or 0) or None
-            agent = _get_chat_agent(user_id=owner_uid, drive_root=DRIVE_ROOT, user_role="admin")
-            if not agent._busy:
-                soft_warned = False
-                continue
-
-            now = time.time()
-            idle_sec = now - agent._last_progress_ts
-            total_sec = now - agent._task_started_ts
-
-            if idle_sec >= HARD_TIMEOUT_SEC:
-                st = st_watch
-                if st.get("owner_chat_id"):
-                    send_with_budget(
-                        int(st["owner_chat_id"]),
-                        f"⚠️ Task stuck ({int(total_sec)}s without progress). "
-                        f"Restarting agent.",
-                    )
-                reset_chat_agent()
-                soft_warned = False
-                continue
-
-            if idle_sec >= SOFT_TIMEOUT_SEC and not soft_warned:
-                soft_warned = True
-                st = st_watch
-                if st.get("owner_chat_id"):
-                    send_with_budget(
-                        int(st["owner_chat_id"]),
-                        f"⏱️ Task running for {int(total_sec)}s, "
-                        f"last progress {int(idle_sec)}s ago. Continuing.",
-                    )
-        except Exception:
-            log.debug("Failed to check/notify chat watchdog", exc_info=True)
-            pass
-
-_watchdog_thread = threading.Thread(target=_chat_watchdog_loop, daemon=True)
-_watchdog_thread.start()
-
-# ----------------------------
 # 6.3) Background consciousness
 # ----------------------------
 from ouroboros.consciousness import BackgroundConsciousness
@@ -462,6 +437,17 @@ def reset_chat_agent():
     import supervisor.workers as _w
     with _w._chat_agents_lock:
         _w._chat_agents.clear()
+
+
+_watchdog_thread = start_chat_watchdog(
+    load_state_fn=load_state,
+    get_chat_agent_fn=_get_chat_agent,
+    send_with_budget_fn=send_with_budget,
+    reset_chat_agent_fn=reset_chat_agent,
+    drive_root=DRIVE_ROOT,
+    soft_timeout_sec=SOFT_TIMEOUT_SEC,
+    hard_timeout_sec=HARD_TIMEOUT_SEC,
+)
 
 # ----------------------------
 # 7) Main loop
@@ -501,316 +487,55 @@ def _safe_qsize(q: Any) -> int:
         return -1
 
 
-def _access_user_label(rec: Dict[str, Any]) -> str:
-    uid = int(rec.get("user_id") or 0)
-    username = str(rec.get("username") or "").strip()
-    first = str(rec.get("first_name") or "").strip()
-    last = str(rec.get("last_name") or "").strip()
-    name = " ".join(part for part in (first, last) if part).strip()
-    if username and name:
-        return f"{name} (@{username}, id={uid})"
-    if username:
-        return f"@{username} (id={uid})"
-    if name:
-        return f"{name} (id={uid})"
-    return f"id={uid}"
+def _admin_chat_ids():
+    return collect_admin_chat_ids(DRIVE_ROOT, load_state)
 
 
-def _admin_chat_ids() -> List[int]:
-    st = load_state()
-    chat_ids: List[int] = []
-    owner_chat_id = st.get("owner_chat_id")
-    if owner_chat_id:
-        chat_ids.append(int(owner_chat_id))
-    for rec in list_user_records(DRIVE_ROOT, role="admin"):
-        cid = rec.get("chat_id")
-        if cid:
-            chat_ids.append(int(cid))
+_access = AccessRuntime(
+    drive_root=DRIVE_ROOT,
+    admin_chat_ids_fn=_admin_chat_ids,
+    load_state_fn=load_state,
+    send_with_budget_fn=send_with_budget,
+    tg=TG,
+    is_admin_user_fn=_is_admin_user,
+    log_chat_fn=log_chat,
+    append_jsonl_fn=append_jsonl,
+)
 
-    seen: Set[int] = set()
-    unique: List[int] = []
-    for cid in chat_ids:
-        if cid not in seen:
-            unique.append(cid)
-            seen.add(cid)
-    return unique
+_teamchat = TeamChatRuntime(
+    drive_root=DRIVE_ROOT,
+    tg=TG,
+    admin_chat_ids_fn=_admin_chat_ids,
+    access_user_label_fn=access_user_label,
+    is_admin_user_fn=_is_admin_user,
+    load_state_fn=load_state,
+    send_with_budget_fn=send_with_budget,
+    log_chat_fn=log_chat,
+    append_jsonl_fn=append_jsonl,
+    bot_id=BOT_ID,
+    bot_username=BOT_USERNAME,
+)
 
-
-def _send_access_request_to_admins(rec: Dict[str, Any]) -> int:
-    pending_count = len(list_user_records(DRIVE_ROOT, access_status=ACCESS_PENDING))
-    uid = int(rec.get("user_id") or 0)
-    body = (
-        "🔐 Новый запрос доступа к боту\n"
-        f"Пользователь: {_access_user_label(rec)}\n"
-        f"Pending-запросов сейчас: {pending_count}\n\n"
-        f"Согласовать: /approve {uid}\n"
-        f"Отказать: /deny {uid}\n"
-        "Согласовать всех pending: /approve all\n"
-        "Посмотреть очередь: /access"
-    )
-    sent = 0
-    owner_id = int(load_state().get("owner_id") or 0) or None
-    for admin_chat_id in _admin_chat_ids():
-        send_with_budget(
-            admin_chat_id,
-            body,
-            log_drive_root=DRIVE_ROOT,
-            log_user_id=owner_id,
-        )
-        sent += 1
-    return sent
-
-
-def _notify_unnotified_access_requests() -> int:
-    sent = 0
-    for rec in list_user_records(DRIVE_ROOT, access_status=ACCESS_PENDING):
-        if rec.get("access_admin_notified_at"):
-            continue
-        count = _send_access_request_to_admins(rec)
-        if count:
-            mark_access_request_notified(DRIVE_ROOT, int(rec["user_id"]))
-            sent += count
-    return sent
-
-
-def _format_access_records(status: str = ACCESS_PENDING) -> str:
-    records = list_user_records(DRIVE_ROOT, access_status=status)
-    title = {
-        ACCESS_PENDING: "Pending-запросы доступа",
-        ACCESS_APPROVED: "Пользователи с доступом",
-        ACCESS_DENIED: "Пользователи без доступа",
-    }.get(status, "Пользователи")
-    if not records:
-        return f"{title}: пусто."
-
-    lines = [f"{title}: {len(records)}"]
-    for rec in records[:30]:
-        requested_at = rec.get("access_requested_at") or rec.get("created_at") or "-"
-        lines.append(f"- {_access_user_label(rec)} | requested={requested_at}")
-    if len(records) > 30:
-        lines.append(f"... ещё {len(records) - 30}")
-    if status == ACCESS_PENDING:
-        lines.extend([
-            "",
-            "Команды:",
-            "/approve all",
-            "/approve <user_id> [user_id...]",
-            "/deny <user_id> [user_id...]",
-        ])
-    return "\n".join(lines)
-
-
-def _parse_access_user_ids(parts: List[str]) -> List[int]:
-    ids: List[int] = []
-    for part in parts:
-        for raw in str(part).replace(",", " ").split():
-            try:
-                ids.append(int(raw))
-            except Exception:
-                continue
-    seen: Set[int] = set()
-    unique: List[int] = []
-    for uid in ids:
-        if uid not in seen:
-            unique.append(uid)
-            seen.add(uid)
-    return unique
-
-
-def _notify_users_access_decision(results: List[Dict[str, Any]], status: str) -> None:
-    for result in results:
-        if result.get("status") == "missing":
-            continue
-        if result.get("old_status") == result.get("status"):
-            continue
-        rec = result.get("record") or {}
-        chat_id = int(rec.get("chat_id") or 0)
-        uid = int(rec.get("user_id") or 0)
-        if not chat_id or not uid:
-            continue
-
-        if status == ACCESS_APPROVED:
-            user_root, _, _ = ensure_user_workspace(
-                DRIVE_ROOT,
-                uid,
-                chat_id,
-                rec,
-                role="user",
-                use_global_root=False,
-                access_status=ACCESS_APPROVED,
-            )
-            send_with_budget(
-                chat_id,
-                "✅ Доступ к боту предоставлен. Можно писать задачу.",
-                log_drive_root=user_root,
-                log_user_id=uid,
-            )
-        elif status == ACCESS_DENIED:
-            send_with_budget(
-                chat_id,
-                "⛔️ Доступ к боту отклонён администратором.",
-                log_drive_root=DRIVE_ROOT,
-                log_user_id=uid,
-            )
-
-
-def _handle_access_command(text: str, chat_id: int, admin_user_id: int) -> bool:
-    parts = text.strip().split()
-    if not parts:
-        return False
-
-    command = parts[0].lower()
-    aliases = {
-        "/approve": "approve",
-        "/allow": "approve",
-        "/deny": "deny",
-        "/reject": "deny",
-    }
-    action = aliases.get(command)
-    args = parts[1:]
-
-    if command in ("/access", "/requests"):
-        if len(parts) == 1:
-            send_with_budget(chat_id, _format_access_records(ACCESS_PENDING), force_budget=True)
-            return True
-        subcommand = parts[1].lower()
-        if subcommand in ("list", "pending"):
-            send_with_budget(chat_id, _format_access_records(ACCESS_PENDING), force_budget=True)
-            return True
-        if subcommand in ("approved", "users"):
-            send_with_budget(chat_id, _format_access_records(ACCESS_APPROVED), force_budget=True)
-            return True
-        if subcommand in ("denied", "rejected"):
-            send_with_budget(chat_id, _format_access_records(ACCESS_DENIED), force_budget=True)
-            return True
-        if subcommand in ("approve", "allow"):
-            action = "approve"
-            args = parts[2:]
-        elif subcommand in ("deny", "reject"):
-            action = "deny"
-            args = parts[2:]
-        else:
-            send_with_budget(
-                chat_id,
-                "Команды доступа: /access, /approve all, /approve <user_id>, /deny <user_id>",
-                force_budget=True,
-            )
-            return True
-
-    if action not in ("approve", "deny"):
-        return False
-
-    target_status = ACCESS_APPROVED if action == "approve" else ACCESS_DENIED
-    if args and args[0].lower() == "all":
-        user_ids = [int(rec["user_id"]) for rec in list_user_records(DRIVE_ROOT, access_status=ACCESS_PENDING)]
-    else:
-        user_ids = _parse_access_user_ids(args)
-
-    if not user_ids:
-        if target_status == ACCESS_APPROVED:
-            send_with_budget(chat_id, "Нет pending-запросов для согласования.", force_budget=True)
-        else:
-            send_with_budget(chat_id, "Укажи user_id для отказа: /deny <user_id>", force_budget=True)
-        return True
-
-    results = set_user_access_status(
-        DRIVE_ROOT,
-        user_ids,
-        target_status,
-        decided_by=admin_user_id,
-    )
-    _notify_users_access_decision(results, target_status)
-
-    updated = [r for r in results if r.get("status") == target_status and r.get("old_status") != target_status]
-    unchanged = [r for r in results if r.get("status") == target_status and r.get("old_status") == target_status]
-    missing = [r for r in results if r.get("status") == "missing"]
-    verb = "согласовано" if target_status == ACCESS_APPROVED else "отклонено"
-    lines = [f"Доступ: {verb} {len(updated)}."]
-    if unchanged:
-        lines.append(f"Без изменений: {len(unchanged)}.")
-    if missing:
-        lines.append("Не найдены: " + ", ".join(str(r.get("user_id")) for r in missing))
-    pending_left = len(list_user_records(DRIVE_ROOT, access_status=ACCESS_PENDING))
-    lines.append(f"Pending осталось: {pending_left}.")
-    send_with_budget(chat_id, "\n".join(lines), force_budget=True)
-    return True
-
-
-def _handle_supervisor_command(text: str, chat_id: int, user_id: int, tg_offset: int = 0):
-    """Handle supervisor slash-commands.
-
-    Returns:
-        True  — terminal command fully handled (caller should `continue`)
-        str   — dual-path note to prepend (caller falls through to LLM)
-        ""    — not a recognized command (falsy, caller falls through)
-    """
-    lowered = text.strip().lower()
-
-    if _handle_access_command(text, chat_id, user_id):
-        return True
-
-    if lowered.startswith("/panic"):
-        send_with_budget(chat_id, "🛑 PANIC: stopping everything now.")
-        kill_workers()
-        st2 = load_state()
-        st2["tg_offset"] = tg_offset
-        save_state(st2)
-        raise SystemExit("PANIC")
-
-    if lowered.startswith("/restart"):
-        st2 = load_state()
-        st2["session_id"] = uuid.uuid4().hex
-        st2["tg_offset"] = tg_offset
-        save_state(st2)
-        send_with_budget(chat_id, "♻️ Restarting (soft).")
-        ok, msg = safe_restart(reason="owner_restart", unsynced_policy="rescue_and_reset")
-        if not ok:
-            send_with_budget(chat_id, f"⚠️ Restart cancelled: {msg}")
-            return True
-        kill_workers()
-        os.execv(sys.executable, [sys.executable, __file__])
-
-    # Dual-path commands: supervisor handles + LLM sees a note
-    if lowered.startswith("/status"):
-        status = status_text(WORKERS, PENDING, RUNNING, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC)
-        send_with_budget(chat_id, status, force_budget=True)
-        return "[Supervisor handled /status — status text already sent to chat]\n"
-
-    if lowered.startswith("/review"):
-        queue_review_task(reason="owner:/review", force=True)
-        return "[Supervisor handled /review — review task queued]\n"
-
-    if lowered.startswith("/evolve"):
-        parts = lowered.split()
-        action = parts[1] if len(parts) > 1 else "on"
-        turn_on = action not in ("off", "stop", "0")
-        st2 = load_state()
-        st2["evolution_mode_enabled"] = bool(turn_on)
-        save_state(st2)
-        if not turn_on:
-            PENDING[:] = [t for t in PENDING if str(t.get("type")) != "evolution"]
-            sort_pending()
-            persist_queue_snapshot(reason="evolve_off")
-        state_str = "ON" if turn_on else "OFF"
-        send_with_budget(chat_id, f"🧬 Evolution: {state_str}")
-        return f"[Supervisor handled /evolve — evolution toggled {state_str}]\n"
-
-    if lowered.startswith("/bg"):
-        parts = lowered.split()
-        action = parts[1] if len(parts) > 1 else "status"
-        if action in ("start", "on", "1"):
-            result = _consciousness.start()
-            send_with_budget(chat_id, f"🧠 {result}")
-        elif action in ("stop", "off", "0"):
-            result = _consciousness.stop()
-            send_with_budget(chat_id, f"🧠 {result}")
-        else:
-            bg_status = "running" if _consciousness.is_running else "stopped"
-            send_with_budget(chat_id, f"🧠 Background consciousness: {bg_status}")
-        return f"[Supervisor handled /bg {action}]\n"
-
-    return ""
-
+_supervisor_commands = SupervisorCommandRuntime(
+    access_runtime=_access,
+    teamchat_runtime=_teamchat,
+    load_state_fn=load_state,
+    save_state_fn=save_state,
+    send_with_budget_fn=send_with_budget,
+    kill_workers_fn=kill_workers,
+    safe_restart_fn=safe_restart,
+    status_text_fn=status_text,
+    workers=WORKERS,
+    pending=PENDING,
+    running=RUNNING,
+    soft_timeout_sec=SOFT_TIMEOUT_SEC,
+    hard_timeout_sec=HARD_TIMEOUT_SEC,
+    queue_review_task_fn=queue_review_task,
+    sort_pending_fn=sort_pending,
+    persist_queue_snapshot_fn=persist_queue_snapshot,
+    consciousness=_consciousness,
+    launcher_file=__file__,
+)
 
 offset = int(load_state().get("tg_offset") or 0)
 _last_diag_heartbeat_ts = 0.0
@@ -862,44 +587,86 @@ while True:
 
     for upd in updates:
         offset = int(upd["update_id"]) + 1
+        callback_query = upd.get("callback_query")
+        if isinstance(callback_query, dict):
+            if _access.handle_callback(callback_query):
+                continue
+            if _teamchat.handle_callback(callback_query):
+                continue
+
+        if _teamchat.handle_added_update(upd):
+            continue
+
         msg = upd.get("message") or upd.get("edited_message") or {}
         if not msg:
             continue
 
-        chat_id = int(msg["chat"]["id"])
+        chat = msg.get("chat") or {}
+        chat_id = int(chat["id"])
+        chat_type = str(chat.get("type") or "private").lower()
         from_user = msg.get("from") or {}
         user_id = int(from_user.get("id") or 0)
         text = str(msg.get("text") or "")
         caption = str(msg.get("caption") or "")
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-        # Extract image if present; save regular documents after user workspace is resolved.
-        image_data = None  # Will be (base64, mime_type, caption) or None
+        # Extract attachment metadata first; actual downloads happen only after
+        # the workspace has been resolved and approved.
+        image_file_id = ""
         pending_document = None
         if msg.get("photo"):
-            # photo is array of PhotoSize, last one is largest
             best_photo = msg["photo"][-1]
-            file_id = best_photo.get("file_id")
-            if file_id:
-                b64, mime = TG.download_file_base64(file_id)
-                if b64:
-                    image_data = (b64, mime, caption)
+            image_file_id = str(best_photo.get("file_id") or "")
         elif msg.get("document"):
             doc = msg["document"]
             mime_type = str(doc.get("mime_type") or "")
             if mime_type.startswith("image/"):
-                file_id = doc.get("file_id")
-                if file_id:
-                    b64, mime = TG.download_file_base64(file_id)
-                    if b64:
-                        image_data = (b64, mime, caption)
+                image_file_id = str(doc.get("file_id") or "")
             else:
                 pending_document = doc
 
         st = load_state()
+        is_team_chat = False
+        team_slug = ""
+        team_chat_id = None
+        is_group_chat = is_group_chat_type(chat_type)
+
+        if is_group_chat:
+            rec, _created, should_notify = request_team_chat(DRIVE_ROOT, chat, requested_by=from_user)
+            status = team_chat_status(rec)
+            if status == TEAM_PENDING:
+                if should_notify:
+                    if _teamchat.send_request_to_admins(rec) > 0:
+                        append_jsonl(DRIVE_ROOT / "logs" / "events.jsonl", {
+                            "ts": now_iso,
+                            "type": "team_chat_access_request",
+                            "chat_id": chat_id,
+                            "source": "message_fallback",
+                        })
+                _last_message_ts = time.time()
+                continue
+            if status == TEAM_DENIED:
+                _last_message_ts = time.time()
+                continue
+            if status != TEAM_APPROVED:
+                _last_message_ts = time.time()
+                continue
+
+            user_drive_root = ensure_team_workspace(DRIVE_ROOT, chat_id)
+            note_team_member_seen(DRIVE_ROOT, chat_id, from_user)
+            is_team_chat = True
+            team_chat_id = chat_id
+            team_slug = team_slug_for_chat(chat_id)
+            is_admin = _is_admin_user(user_id, st)
+            user_role = "admin" if is_admin else "user"
+        else:
+            user_drive_root = None
+            is_admin = False
+            user_role = "user"
+
         owner_missing = st.get("owner_id") is None
         user_allowed_as_admin = (not ADMIN_USER_IDS) or (user_id in ADMIN_USER_IDS)
-        if owner_missing and user_allowed_as_admin:
+        if not is_group_chat and owner_missing and user_allowed_as_admin:
             st["owner_id"] = user_id
             st["owner_chat_id"] = chat_id
             st["last_owner_message_at"] = now_iso
@@ -912,13 +679,14 @@ while True:
             )
             log_chat("in", chat_id, user_id, text, drive_root=DRIVE_ROOT)
             send_with_budget(chat_id, "✅ Owner registered. Ouroboros online.")
-            _notify_unnotified_access_requests()
+            _access.notify_unnotified_requests()
             continue
 
-        is_admin = _is_admin_user(user_id, st)
-        user_role = "admin" if is_admin else "user"
+        if not is_group_chat:
+            is_admin = _is_admin_user(user_id, st)
+            user_role = "admin" if is_admin else "user"
         preapproved_user = user_id in APPROVED_USER_IDS
-        if REQUIRE_USER_APPROVAL and not is_admin and not preapproved_user:
+        if not is_group_chat and REQUIRE_USER_APPROVAL and not is_admin and not preapproved_user:
             access_rec, access_created, should_notify_admins = request_user_access(
                 DRIVE_ROOT, user_id, chat_id, from_user,
             )
@@ -935,8 +703,8 @@ while True:
                     "created": access_created,
                 })
                 if access_status == ACCESS_PENDING and should_notify_admins:
-                    if _send_access_request_to_admins(access_rec) > 0:
-                        mark_access_request_notified(DRIVE_ROOT, user_id)
+                    if _access.send_request_to_admins(access_rec) > 0:
+                        _access.mark_request_notified(user_id)
 
                 if access_status == ACCESS_PENDING:
                     reply = (
@@ -956,13 +724,22 @@ while True:
                 )
                 continue
 
-        user_drive_root, user_created, _user_record = ensure_user_workspace(
-            DRIVE_ROOT, user_id, chat_id, from_user,
-            role=user_role, use_global_root=is_admin,
-            access_status=ACCESS_APPROVED,
-        )
+        if not is_group_chat:
+            user_drive_root, user_created, _user_record = ensure_user_workspace(
+                DRIVE_ROOT, user_id, chat_id, from_user,
+                role=user_role, use_global_root=is_admin,
+                access_status=ACCESS_APPROVED,
+            )
+        else:
+            user_created = False
         if is_admin:
-            _notify_unnotified_access_requests()
+            _access.notify_unnotified_requests()
+
+        image_data = None
+        if image_file_id:
+            b64, mime = TG.download_file_base64(image_file_id)
+            if b64:
+                image_data = (b64, mime, caption)
 
         saved_document = None
         document_download_failed = False
@@ -1005,14 +782,21 @@ while True:
         elif document_download_failed:
             log_text = (text or caption or "") + "\n[attached document download failed]"
         log_chat("in", chat_id, user_id, log_text, drive_root=user_drive_root)
-        if is_admin:
+        if is_team_chat:
+            st["last_team_message_at"] = now_iso
+        elif is_admin:
             st["last_owner_message_at"] = now_iso
         else:
             st["last_user_message_at"] = now_iso
         _last_message_ts = time.time()
         save_state(st)
 
-        if user_created and not is_admin and text.strip().lower().startswith("/start"):
+        if is_team_chat and not _teamchat.is_group_task_trigger(msg, text, caption):
+            continue
+        if is_team_chat and text:
+            text = _teamchat.strip_bot_mention(text)
+
+        if not is_team_chat and user_created and not is_admin and text.strip().lower().startswith("/start"):
             send_with_budget(
                 chat_id,
                 "✅ User workspace initialized. You can use this bot as your personal agent.",
@@ -1022,9 +806,18 @@ while True:
             continue
 
         # --- Supervisor commands ---
+        if is_admin_only_command(text) and not is_admin:
+            send_with_budget(
+                chat_id,
+                "⚠️ Admin menu and access management are admin-only.",
+                log_drive_root=user_drive_root,
+                log_user_id=user_id,
+            )
+            continue
+
         if text.strip().lower().startswith("/") and is_admin:
             try:
-                result = _handle_supervisor_command(text, chat_id, user_id, tg_offset=offset)
+                result = _supervisor_commands.handle(text, chat_id, user_id, tg_offset=offset)
                 if result is True:
                     continue  # terminal command, fully handled
                 elif result:  # non-empty string = dual-path note
@@ -1034,7 +827,7 @@ while True:
             except Exception:
                 log.warning("Supervisor command handler error", exc_info=True)
 
-        if text.strip().lower().startswith("/start") and not is_admin:
+        if not is_team_chat and text.strip().lower().startswith("/start") and not is_admin:
             send_with_budget(
                 chat_id,
                 "✅ Your personal workspace is ready. Send a message to start working with the agent.",
@@ -1125,6 +918,10 @@ while True:
                 _user_id=user_id,
                 _user_role=user_role,
                 _user_drive_root=user_drive_root,
+                _chat_type=chat_type,
+                _team_chat_id=team_chat_id,
+                _team_slug=team_slug,
+                _is_team_workspace=is_team_chat,
                 _is_admin=is_admin,
                 _agent=agent,
             ):
@@ -1134,6 +931,10 @@ while True:
                         user_id=_user_id,
                         user_role=_user_role,
                         drive_root=_user_drive_root,
+                        chat_type=_chat_type,
+                        team_chat_id=_team_chat_id,
+                        team_slug=_team_slug,
+                        is_team_workspace=_is_team_workspace,
                     )
                 finally:
                     _agent._dispatching = False

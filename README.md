@@ -167,7 +167,7 @@ for k, v in CFG.items():
 
 Open your Telegram bot and send any message. If `OUROBOROS_ADMIN_USER_IDS` is empty, the first person to write becomes the **creator** (owner). If it is set, only those Telegram user IDs can claim admin rights.
 
-Other Telegram users request access first. Admins receive the request in Telegram and can run `/approve <user_id>`, `/deny <user_id>`, or `/approve all`. Once approved, each user gets a separate memory/log workspace under `users/<telegram_user_id>/`, while admin-only tools such as shell, git, evolution, restart, and model switching remain restricted. Existing users already present in `state/users.json` keep access after upgrade.
+Other Telegram users request access first. Admins receive the request in Telegram with inline approve/deny buttons, or can run `/admin`, `/approve <user_id>`, `/deny <user_id>`, or `/approve all`. Once approved, each user gets a separate memory/log workspace under `users/<telegram_user_id>/`, while admin-only tools such as shell, git, evolution, restart, and model switching remain restricted. Existing users already present in `state/users.json` keep access after upgrade.
 
 You can also send documents directly in Telegram. PDF, ZIP, PPTX, DOCX, and text-like files are saved into the sender's workspace under `uploads/YYYY-MM-DD/` and become available to `analyze_document`. Long document workflows emit progress messages while files are downloaded, unpacked, and parsed.
 
@@ -182,6 +182,7 @@ You can also send documents directly in Telegram. PDF, ZIP, PPTX, DOCX, and text
 | `/panic` | Emergency stop. Kills all workers and halts the process immediately. |
 | `/restart` | Soft restart. Saves state, kills workers, re-launches the process. |
 | `/status` | Shows active workers, task queue, and budget breakdown. |
+| `/admin` | Open the admin menu for user and group access management. |
 | `/access` | List pending user access requests. |
 | `/approve <user_id>` | Approve one or more pending users. Use `/approve all` for bulk approval. |
 | `/deny <user_id>` | Reject a user access request. |
@@ -211,6 +212,7 @@ Ouroboros exposes its abilities through an auto-discovered tool registry. The LL
 | Vision | `analyze_screenshot`, `vlm_query`, `send_photo` | Analyze screenshots or provided images and send generated/collected images back to Telegram. |
 | Memory and knowledge | `chat_history`, `update_scratchpad`, `update_identity`, `knowledge_read`, `knowledge_write`, `knowledge_list`, `summarize_dialogue` | Maintain persistent memory, structured knowledge topics, and dialogue summaries. |
 | Task orchestration | `schedule_task`, `wait_for_task`, `get_task_result`, `cancel_task`, `forward_to_worker` | Decompose complex work into background tasks and route follow-up messages to the right worker. |
+| Team workspaces | `team_inbox_send`, `team_inbox_read`, `team_members` | Coordinate agents inside an approved Telegram group workspace without exposing private user memory. |
 | Context management | `compact_context`, `list_available_tools`, `enable_tools` | Keep long conversations manageable and dynamically expose non-core tools only when needed. |
 | Health and review | `codebase_health`, `multi_model_review`, `request_review` | Inspect code health and ask other models to review important changes. |
 | Git and self-modification | `repo_write_commit`, `repo_commit_push`, `git_status`, `git_diff`, `request_restart`, `promote_to_stable`, `toggle_evolution`, `generate_evolution_stats` | Let Ouroboros modify itself, commit, push, restart, promote stable branches, and generate evolution metrics when self-modification is enabled. |
@@ -235,9 +237,22 @@ Ouroboros can serve multiple Telegram users from one bot and one runtime.
 - Regular approved users get isolated memory, chat history, logs, uploads, task results, and scratchpads.
 - Admin-only capabilities stay protected: git operations, shell access, model switching, evolution mode, restart, and review controls.
 - Budget tracking is global, but non-admin budget output is redacted to avoid exposing private spend details.
-- Access commands for admins: `/access` lists pending requests, `/approve <user_id>` approves one or more users, `/deny <user_id>` rejects a request, and `/approve all` approves every pending request.
+- Access commands for admins: `/admin` opens the user/group access menu, `/access` lists pending requests, `/approve <user_id>` approves one or more users, `/deny <user_id>` rejects a request, and `/approve all` approves every pending request.
 
 The user registry is stored at `state/users.json` inside the configured drive/runtime state directory.
+
+### Telegram Group Workspaces
+
+When the bot is added to a Telegram group or supergroup, Ouroboros creates a pending team-chat request and stays silent in that group until an Ouroboros admin approves it.
+
+- Admins receive a private approval message with inline buttons: `Разрешить` / `Запретить`. Group access can also be managed from `/admin`.
+- Fallback commands: `/teamchat pending`, `/teamchat approved`, `/teamchat denied`, `/teamchat approve <chat_id>`, `/teamchat deny <chat_id>`.
+- Approved groups get a shared workspace under `teams/tg_<abs_chat_id>/` with group memory, logs, uploads, task results, and inbox.
+- Pending and denied groups do not run LLM tasks or accumulate group history.
+- In approved groups, the bot answers only when mentioned, replied to, or addressed by slash command.
+- Group tasks use only the group workspace; personal user memory, scratchpads, identities, and private chat history are not injected.
+
+The team chat registry is stored at `state/team_chats.json`.
 
 ---
 

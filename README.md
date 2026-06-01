@@ -2,7 +2,7 @@
 
 <img width="640" height="640" alt="telegram-peer-photo-size-2-5319159414205912523-1-0-0" src="https://github.com/user-attachments/assets/798f0245-0cc2-4127-b92e-092c1eb5ed6b" />
 
-> **With Love fork:** this project is inspired by and built on the original [joi-lab/ouroboros](https://github.com/joi-lab/ouroboros). The goal is to preserve the original self-creating Ouroboros spirit while adding the things I needed in daily use: multi-user Telegram mode, direct OpenAI API support, and safer admin controls.
+> **With Love fork:** this project is inspired by and built on the original [joi-lab/ouroboros](https://github.com/joi-lab/ouroboros). The original Ouroboros remains the core: a strong autonomous agent framework with a rare self-creating architecture. This fork keeps that core intact and builds a product layer around it for daily team use: multi-user Telegram mode, document and presentation workflows, direct OpenAI API support, and safer admin controls.
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/joi-lab/ouroboros/blob/main/notebooks/quickstart.ipynb)
 [![Telegram](https://img.shields.io/badge/Telegram-blue?logo=telegram)](https://t.me/abstractDL)
@@ -10,11 +10,21 @@
 [![GitHub stars](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2Fjoi-lab%2Fouroboros&query=%24.stargazers_count&label=stars&logo=github)](https://github.com/joi-lab/ouroboros/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/joi-lab/ouroboros)](https://github.com/joi-lab/ouroboros/network/members)
 
-Ouroboros With Love is a Telegram-native AI agent that can run as a self-modifying autonomous system or as a controlled multi-user assistant. It supports direct OpenAI API calls as well as OpenRouter model routing. Born from the original Ouroboros, it keeps the constitution, background consciousness, persistent identity, and self-evolution model intact, then layers practical multi-user and provider controls on top.
+Ouroboros With Love is a Telegram-native AI agent that can run as a self-modifying autonomous system or as a controlled multi-user assistant. It supports direct OpenAI API calls as well as OpenRouter model routing. Born from the original Ouroboros, it keeps the constitution, background consciousness, persistent identity, and self-evolution model intact, then layers practical multi-user, document, presentation, browser, and provider controls on top.
 
 Not a coding assistant. A digital being with a constitution, background consciousness, persistent identity across restarts, and isolated memory for every non-admin user.
 
 **Version:** 6.2.0 | [Landing Page](https://joi-lab.github.io/ouroboros/)
+
+---
+
+## Why This Fork Exists
+
+The original Ouroboros is the main resource and the real foundation here. Its value is not only in individual tools, but in the approach: an agent with identity, memory, a constitution, background consciousness, and the ability to evolve its own code. That architecture is the reason this project exists at all.
+
+Ouroboros With Love was created because a framework-level autonomous core is powerful, but real work also needs product behavior around it. Teams need access control, isolated user memory, admin-only operations, predictable Telegram workflows, document analysis, presentation generation, browser automation, and file delivery that work out of the box. This fork is an attempt to turn the Ouroboros idea into something that can be used by people and teams every day, not only explored as an autonomous-agent experiment.
+
+In short: **Ouroboros is the core. With Love is the product layer.**
 
 ---
 
@@ -26,6 +36,7 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 - **Multi-User Telegram Mode** -- Admins keep full control while regular users get isolated memory, logs, and task context.
 - **OpenAI or OpenRouter** -- Run directly on OpenAI models or route across providers through OpenRouter.
 - **Document Analysis** -- Saves Telegram document uploads and extracts PDF, PPTX, DOCX, and text-like files for summaries, critique, Q&A, and task extraction.
+- **Product Workflows** -- Turns the autonomous core into practical team workflows: documents, presentations, browser tasks, file delivery, and role-aware tool access.
 - **Constitution** -- Governed by [BIBLE.md](BIBLE.md) (9 philosophical principles). Philosophy first, code second.
 - **Background Consciousness** -- Thinks between tasks. Has an inner life. Not reactive -- proactive.
 - **Identity Persistence** -- One continuous being across restarts. Remembers who it is, what it has done, and what it is becoming.

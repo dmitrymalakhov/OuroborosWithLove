@@ -21,6 +21,18 @@ def _inbox_path(ctx: ToolContext) -> pathlib.Path:
     return ctx.drive_root / "inbox" / "messages.jsonl"
 
 
+def _chat_log_path(ctx: ToolContext) -> pathlib.Path:
+    return ctx.drive_root / "logs" / "chat.jsonl"
+
+
+def _clean_limit(value: int, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
 def _team_registry_record(ctx: ToolContext) -> Dict[str, Any]:
     path = (ctx.shared_drive_root or ctx.drive_root) / "state" / "team_chats.json"
     try:
@@ -54,6 +66,16 @@ def _read_jsonl_tail(path: pathlib.Path, limit: int) -> List[Dict[str, Any]]:
         except Exception:
             continue
     return out
+
+
+def _format_chat_entry(entry: Dict[str, Any], max_text_chars: int = 900) -> str:
+    direction_raw = str(entry.get("direction") or "").lower()
+    direction = "→" if direction_raw in ("out", "outgoing") else "←"
+    ts = str(entry.get("ts") or "")[:16]
+    user_id = entry.get("user_id")
+    who = "bot" if direction == "→" else f"user={user_id or '?'}"
+    text = short(str(entry.get("text") or ""), max_text_chars)
+    return f"{direction} [{ts}] {who}: {text}"
 
 
 def _team_inbox_send(ctx: ToolContext, message: str, topic: str = "") -> str:
@@ -112,6 +134,58 @@ def _team_inbox_read(ctx: ToolContext, limit: int = 20, since_id: str = "") -> s
     return "\n".join(lines)
 
 
+def _team_chat_history(ctx: ToolContext, limit: int = 50, offset: int = 0, include_bot: bool = True) -> str:
+    err = _require_team(ctx)
+    if err:
+        return err
+    limit = _clean_limit(limit, default=50, minimum=1, maximum=200)
+    offset = _clean_limit(offset, default=0, minimum=0, maximum=10_000)
+    entries = _read_jsonl_tail(_chat_log_path(ctx), limit=limit + offset + 50)
+    if not include_bot:
+        entries = [entry for entry in entries if str(entry.get("direction") or "").lower() not in ("out", "outgoing")]
+    if offset:
+        entries = entries[:-offset] if offset < len(entries) else []
+    entries = entries[-limit:]
+    if not entries:
+        return "Team chat history is empty."
+    lines = [f"Team chat history ({len(entries)} messages):"]
+    lines.extend(_format_chat_entry(entry) for entry in entries)
+    return "\n".join(lines)
+
+
+def _team_chat_search(
+    ctx: ToolContext,
+    query: str,
+    limit: int = 20,
+    max_scan: int = 1000,
+    include_bot: bool = True,
+    case_sensitive: bool = False,
+) -> str:
+    err = _require_team(ctx)
+    if err:
+        return err
+    needle = str(query or "").strip()
+    if not needle:
+        return "⚠️ Empty search query."
+    limit = _clean_limit(limit, default=20, minimum=1, maximum=100)
+    max_scan = _clean_limit(max_scan, default=1000, minimum=50, maximum=5000)
+    entries = _read_jsonl_tail(_chat_log_path(ctx), limit=max_scan)
+    if not include_bot:
+        entries = [entry for entry in entries if str(entry.get("direction") or "").lower() not in ("out", "outgoing")]
+
+    if case_sensitive:
+        matches = [entry for entry in entries if needle in str(entry.get("text") or "")]
+    else:
+        needle_lower = needle.lower()
+        matches = [entry for entry in entries if needle_lower in str(entry.get("text") or "").lower()]
+    matches = matches[-limit:]
+    if not matches:
+        return f"No team chat messages matched: {needle}"
+    lines = [f"Team chat search for {needle!r}: {len(matches)} matches"]
+    lines.extend(_format_chat_entry(entry) for entry in matches)
+    return "\n".join(lines)
+
+
 def _team_members(ctx: ToolContext) -> str:
     err = _require_team(ctx)
     if err:
@@ -156,6 +230,26 @@ def get_tools() -> List[ToolEntry]:
                 "since_id": {"type": "string", "description": "Optional message id; return messages after it."},
             }, "required": []},
         }, _team_inbox_read),
+        ToolEntry("team_chat_history", {
+            "name": "team_chat_history",
+            "description": "Read recent Telegram group messages from the current approved team workspace.",
+            "parameters": {"type": "object", "properties": {
+                "limit": {"type": "integer", "default": 50, "description": "Number of recent messages to return."},
+                "offset": {"type": "integer", "default": 0, "description": "Skip this many newest messages."},
+                "include_bot": {"type": "boolean", "default": True, "description": "Include bot replies."},
+            }, "required": []},
+        }, _team_chat_history),
+        ToolEntry("team_chat_search", {
+            "name": "team_chat_search",
+            "description": "Search Telegram group chat history in the current approved team workspace.",
+            "parameters": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "Text to search for in group chat messages."},
+                "limit": {"type": "integer", "default": 20, "description": "Maximum matches to return."},
+                "max_scan": {"type": "integer", "default": 1000, "description": "Maximum recent log entries to scan."},
+                "include_bot": {"type": "boolean", "default": True, "description": "Search bot replies too."},
+                "case_sensitive": {"type": "boolean", "default": False},
+            }, "required": ["query"]},
+        }, _team_chat_search),
         ToolEntry("team_members", {
             "name": "team_members",
             "description": "List Telegram users observed in the current approved team workspace.",

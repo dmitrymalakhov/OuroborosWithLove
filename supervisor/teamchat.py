@@ -18,6 +18,7 @@ from supervisor.teams import (
     TEAM_DENIED,
     TEAM_PENDING,
     append_team_chat_notification,
+    ensure_team_workspace,
     is_group_chat_type,
     list_team_chats,
     request_team_chat,
@@ -26,6 +27,7 @@ from supervisor.teams import (
 )
 
 log = logging.getLogger(__name__)
+GROUP_TRIGGER_COMMANDS = {"ask", "ai", "ouro", "ouroboros"}
 
 
 def team_chat_label(rec: Dict[str, Any]) -> str:
@@ -135,6 +137,41 @@ def strip_bot_mention(text: str, bot_username: str = "") -> str:
     return re.sub(r"\s{2,}", " ", stripped).strip()
 
 
+def strip_group_command(text: str, bot_username: str = "") -> str:
+    raw = str(text or "").strip()
+    if not raw.startswith("/"):
+        return text
+    first, sep, rest = raw.partition(" ")
+    match = re.match(r"^/([A-Za-z0-9_]+)(?:@([A-Za-z0-9_]+))?$", first)
+    if not match:
+        return text
+    command = match.group(1).lower()
+    target = (match.group(2) or "").lower()
+    username = str(bot_username or "").strip().lstrip("@").lower()
+    targets_this_bot = bool(username and target == username)
+    if command in GROUP_TRIGGER_COMMANDS or targets_this_bot:
+        return rest.strip() if sep else ""
+    return text
+
+
+def prepare_group_task_text(text: str, bot_username: str = "") -> str:
+    without_mention = strip_bot_mention(text, bot_username=bot_username)
+    return strip_group_command(without_mention, bot_username=bot_username).strip()
+
+
+def group_approved_text(bot_username: str = "") -> str:
+    command = "/ask"
+    username = str(bot_username or "").strip().lstrip("@")
+    if username:
+        command = f"/ask@{username}"
+    return (
+        "✅ Ouroboros подключён к группе.\n\n"
+        "Если Telegram privacy mode включён, я вижу только команды и ответы на мои сообщения. "
+        f"Пиши так: `{command} текст задачи`, или отвечай reply на это сообщение.\n\n"
+        "Чтобы я видел обычные сообщения группы, отключи privacy mode у бота в BotFather."
+    )
+
+
 @dataclass
 class TeamChatRuntime:
     drive_root: pathlib.Path
@@ -224,10 +261,24 @@ class TeamChatRuntime:
             msg = f"Уже {target_status}: {team_chat_label(rec)}"
         elif target_status == TEAM_APPROVED:
             msg = f"Группа разрешена: {team_chat_label(rec)}"
+            self.notify_group_approved(rec)
         else:
             msg = f"Группа запрещена: {team_chat_label(rec)}"
         self.edit_notifications(rec)
         return True, msg, rec
+
+    def notify_group_approved(self, rec: Dict[str, Any]) -> None:
+        chat_id = int(rec.get("chat_id") or 0)
+        if not chat_id:
+            return
+        owner_id = int(self.load_state_fn().get("owner_id") or 0) or None
+        team_root = ensure_team_workspace(self.drive_root, chat_id)
+        self.send_with_budget_fn(
+            chat_id,
+            group_approved_text(self.bot_username),
+            log_drive_root=team_root,
+            log_user_id=owner_id,
+        )
 
     def format_records(self, status: str = TEAM_PENDING) -> str:
         records = list_team_chats(self.drive_root, status=status)
@@ -370,3 +421,6 @@ class TeamChatRuntime:
 
     def strip_bot_mention(self, text: str) -> str:
         return strip_bot_mention(text, bot_username=self.bot_username)
+
+    def prepare_group_task_text(self, text: str) -> str:
+        return prepare_group_task_text(text, bot_username=self.bot_username)

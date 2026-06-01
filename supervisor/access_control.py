@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import pathlib
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -96,6 +97,95 @@ def _user_name(rec: Dict[str, Any]) -> str:
     return f"id {int(rec.get('user_id') or 0)}"
 
 
+def _user_list_identity(rec: Dict[str, Any]) -> str:
+    username = str(rec.get("username") or "").strip()
+    if username:
+        return f"@{username}"
+    return f"id {int(rec.get('user_id') or 0)}"
+
+
+def _user_log_roots(drive_root: pathlib.Path, rec: Dict[str, Any]) -> List[pathlib.Path]:
+    roots: List[pathlib.Path] = []
+    raw_root = str(rec.get("drive_root") or "").strip()
+    if raw_root:
+        roots.append(pathlib.Path(raw_root))
+    roots.append(drive_root)
+
+    unique: List[pathlib.Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root)
+        if key and key not in seen:
+            unique.append(root)
+            seen.add(key)
+    return unique
+
+
+def _chat_log_paths(root: pathlib.Path) -> List[pathlib.Path]:
+    paths = [root / "logs" / "chat.jsonl"]
+    archive_dir = root / "archive"
+    try:
+        paths.extend(sorted(archive_dir.glob("chat_*.jsonl")))
+    except Exception:
+        pass
+    return paths
+
+
+def _count_user_requests_in_log(path: pathlib.Path, user_ids: set[int]) -> Dict[int, int]:
+    counts: Dict[int, int] = {}
+    try:
+        if not path.exists():
+            return counts
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if row.get("direction") != "in":
+                    continue
+                try:
+                    row_user_id = int(row.get("user_id") or 0)
+                except Exception:
+                    continue
+                if row_user_id not in user_ids:
+                    continue
+                if str(row.get("text") or "").strip():
+                    counts[row_user_id] = counts.get(row_user_id, 0) + 1
+    except Exception:
+        return {}
+    return counts
+
+
+def _user_request_counts(drive_root: pathlib.Path, records: List[Dict[str, Any]]) -> Dict[int, int]:
+    user_ids: set[int] = set()
+    for rec in records:
+        try:
+            uid = int(rec.get("user_id") or 0)
+        except Exception:
+            continue
+        if uid:
+            user_ids.add(uid)
+    counts = {uid: 0 for uid in user_ids}
+    if not user_ids:
+        return counts
+
+    paths: List[pathlib.Path] = []
+    seen_paths: set[str] = set()
+    for rec in records:
+        for root in _user_log_roots(drive_root, rec):
+            for path in _chat_log_paths(root):
+                key = str(path)
+                if key not in seen_paths:
+                    paths.append(path)
+                    seen_paths.add(key)
+
+    for path in paths:
+        for uid, count in _count_user_requests_in_log(path, user_ids).items():
+            counts[uid] = counts.get(uid, 0) + count
+    return counts
+
+
 def _user_detail_line(rec: Dict[str, Any], status: str) -> str:
     username = str(rec.get("username") or "").strip()
     uid = int(rec.get("user_id") or 0)
@@ -115,6 +205,23 @@ def _user_detail_line(rec: Dict[str, Any], status: str) -> str:
     parts.append(f"id {uid}")
     parts.append(f"{date_label}: {_format_dt(when)}")
     return " · ".join(parts)
+
+
+def _user_list_detail_lines(rec: Dict[str, Any], status: str, request_count: int) -> List[str]:
+    when = {
+        ACCESS_PENDING: rec.get("access_last_requested_at") or rec.get("access_requested_at"),
+        ACCESS_APPROVED: rec.get("access_approved_at") or rec.get("created_at"),
+        ACCESS_DENIED: rec.get("access_denied_at") or rec.get("created_at"),
+    }.get(status) or rec.get("created_at")
+    date_label = {
+        ACCESS_PENDING: "запрос",
+        ACCESS_APPROVED: "доступ",
+        ACCESS_DENIED: "отключён",
+    }.get(status, "дата")
+    return [
+        f"   {_user_list_identity(rec)} · запросов: {request_count}",
+        f"   {date_label}: {_format_dt(when)}",
+    ]
 
 
 def _team_name(rec: Dict[str, Any]) -> str:
@@ -336,10 +443,12 @@ class AccessRuntime:
             return f"{title}: пусто."
 
         visible = records[:20]
+        request_counts = _user_request_counts(self.drive_root, visible)
         lines = [f"{title}: {len(records)}", ""]
         for idx, rec in enumerate(visible, start=1):
+            uid = int(rec.get("user_id") or 0)
             lines.append(f"{idx}. {_user_name(rec)}")
-            lines.append(f"   {_user_detail_line(rec, status)}")
+            lines.extend(_user_list_detail_lines(rec, status, request_counts.get(uid, 0)))
         if len(records) > len(visible):
             lines.append(f"\nПоказаны первые {len(visible)} из {len(records)}.")
         if status == ACCESS_PENDING:

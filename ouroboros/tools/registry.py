@@ -110,7 +110,7 @@ CORE_TOOL_NAMES = {
     "request_restart", "promote_to_stable",
     "knowledge_read", "knowledge_write",
     "browse_page", "browser_action", "analyze_screenshot",
-    "team_inbox_send", "team_inbox_read", "team_members",
+    "team_inbox_send", "team_inbox_read", "team_chat_history", "team_chat_search", "team_members",
 }
 
 

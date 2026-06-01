@@ -125,7 +125,7 @@ EXPECTED_TOOLS = [
     "list_available_tools",
     "enable_tools",
     # Team workspaces
-    "team_inbox_send", "team_inbox_read", "team_members",
+    "team_inbox_send", "team_inbox_read", "team_chat_history", "team_chat_search", "team_members",
 ]
 
 

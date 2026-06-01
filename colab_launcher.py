@@ -405,6 +405,8 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
     "approved_user_ids_count": len(APPROVED_USER_IDS),
     "diag_heartbeat_sec": DIAG_HEARTBEAT_SEC,
     "diag_slow_cycle_sec": DIAG_SLOW_CYCLE_SEC,
+    "telegram_bot_username": BOT_USERNAME,
+    "telegram_can_read_all_group_messages": _BOT_INFO.get("can_read_all_group_messages"),
 })
 
 # ----------------------------
@@ -794,7 +796,7 @@ while True:
         if is_team_chat and not _teamchat.is_group_task_trigger(msg, text, caption):
             continue
         if is_team_chat and text:
-            text = _teamchat.strip_bot_mention(text)
+            text = _teamchat.prepare_group_task_text(text)
 
         if not is_team_chat and user_created and not is_admin and text.strip().lower().startswith("/start"):
             send_with_budget(

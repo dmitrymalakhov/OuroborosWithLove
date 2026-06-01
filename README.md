@@ -212,7 +212,7 @@ Ouroboros exposes its abilities through an auto-discovered tool registry. The LL
 | Vision | `analyze_screenshot`, `vlm_query`, `send_photo` | Analyze screenshots or provided images and send generated/collected images back to Telegram. |
 | Memory and knowledge | `chat_history`, `update_scratchpad`, `update_identity`, `knowledge_read`, `knowledge_write`, `knowledge_list`, `summarize_dialogue` | Maintain persistent memory, structured knowledge topics, and dialogue summaries. |
 | Task orchestration | `schedule_task`, `wait_for_task`, `get_task_result`, `cancel_task`, `forward_to_worker` | Decompose complex work into background tasks and route follow-up messages to the right worker. |
-| Team workspaces | `team_inbox_send`, `team_inbox_read`, `team_members` | Coordinate agents inside an approved Telegram group workspace without exposing private user memory. |
+| Team workspaces | `team_inbox_send`, `team_inbox_read`, `team_chat_history`, `team_chat_search`, `team_members` | Coordinate agents and inspect approved Telegram group context without exposing private user memory. |
 | Context management | `compact_context`, `list_available_tools`, `enable_tools` | Keep long conversations manageable and dynamically expose non-core tools only when needed. |
 | Health and review | `codebase_health`, `multi_model_review`, `request_review` | Inspect code health and ask other models to review important changes. |
 | Git and self-modification | `repo_write_commit`, `repo_commit_push`, `git_status`, `git_diff`, `request_restart`, `promote_to_stable`, `toggle_evolution`, `generate_evolution_stats` | Let Ouroboros modify itself, commit, push, restart, promote stable branches, and generate evolution metrics when self-modification is enabled. |
@@ -250,6 +250,7 @@ When the bot is added to a Telegram group or supergroup, Ouroboros creates a pen
 - Approved groups get a shared workspace under `teams/tg_<abs_chat_id>/` with group memory, logs, uploads, task results, and inbox.
 - Pending and denied groups do not run LLM tasks or accumulate group history.
 - In approved groups, the bot answers only when mentioned, replied to, or addressed by slash command.
+- In approved groups, agents can read recent group messages with `team_chat_history` and search them with `team_chat_search`.
 - Group tasks use only the group workspace; personal user memory, scratchpads, identities, and private chat history are not injected.
 
 The team chat registry is stored at `state/team_chats.json`.

@@ -1,5 +1,14 @@
+import json
 import pathlib
 import tempfile
+
+
+def _write_jsonl(path: pathlib.Path, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )
 
 
 class FakeAccessTG:
@@ -226,6 +235,18 @@ def test_admin_user_list_is_numbered_and_keyboard_is_compact():
             from_user={"username": "alice", "first_name": "Alice", "last_name": "Doe"},
         )
         set_user_access_status(drive_root, [123], ACCESS_APPROVED, decided_by=1)
+        _write_jsonl(drive_root / "logs" / "chat.jsonl", [
+            {"direction": "in", "user_id": 123, "text": "/start"},
+            {"direction": "out", "user_id": 123, "text": "ok"},
+            {"direction": "in", "user_id": 999, "text": "other"},
+        ])
+        _write_jsonl(drive_root / "users" / "123" / "logs" / "chat.jsonl", [
+            {"direction": "in", "user_id": 123, "text": "hello"},
+            {"direction": "in", "user_id": 123, "text": ""},
+        ])
+        _write_jsonl(drive_root / "users" / "123" / "archive" / "chat_20260601_000000.jsonl", [
+            {"direction": "in", "user_id": 123, "text": "old request"},
+        ])
         runtime = AccessRuntime(
             drive_root=drive_root,
             admin_chat_ids_fn=lambda: [1],
@@ -238,7 +259,8 @@ def test_admin_user_list_is_numbered_and_keyboard_is_compact():
         button_texts = [button["text"] for row in keyboard["inline_keyboard"] for button in row]
 
         assert "1. Alice Doe" in text
-        assert "@alice · id 123" in text
+        assert "@alice · запросов: 3" in text
+        assert "   доступ:" in text
         assert "requested=" not in text
         assert "T" not in text
         assert "⛔️ 1" in button_texts

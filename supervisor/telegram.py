@@ -30,6 +30,15 @@ BUDGET_REPORT_EVERY_MESSAGES: int = 10
 _TG: Optional["TelegramClient"] = None
 
 
+def redact_telegram_token(text: str, token: str = "") -> str:
+    safe = str(text or "")
+    if token:
+        safe = safe.replace(str(token), "<telegram-token>")
+    safe = re.sub(r"/bot[^/\s'\")]+", "/bot<telegram-token>", safe)
+    safe = re.sub(r"file/bot[^/\s'\")]+", "file/bot<telegram-token>", safe)
+    return safe
+
+
 def init(drive_root, total_budget_limit: float, budget_report_every: int,
          tg_client: "TelegramClient") -> None:
     global DRIVE_ROOT, TOTAL_BUDGET_LIMIT, BUDGET_REPORT_EVERY_MESSAGES, _TG
@@ -54,6 +63,12 @@ class TelegramClient:
         self._token = token
         self._me_cache: Optional[Dict[str, Any]] = None
 
+    def _format_error(self, exc: Exception) -> str:
+        return redact_telegram_token(repr(exc), self._token)
+
+    def _format_api_error(self, data: Any) -> str:
+        return redact_telegram_token(f"telegram_api_error: {data}", self._token)
+
     def get_updates(self, offset: int, timeout: int = 10) -> List[Dict[str, Any]]:
         last_err = "unknown"
         for attempt in range(3):
@@ -71,7 +86,7 @@ class TelegramClient:
                     raise RuntimeError(f"Telegram getUpdates failed: {data}")
                 return data.get("result") or []
             except Exception as e:
-                last_err = repr(e)
+                last_err = self._format_error(e)
                 if attempt < 2:
                     import time
                     time.sleep(0.8 * (attempt + 1))
@@ -80,9 +95,12 @@ class TelegramClient:
     def get_me(self) -> Dict[str, Any]:
         if self._me_cache is not None:
             return dict(self._me_cache)
-        r = requests.get(f"{self.base}/getMe", timeout=10)
-        r.raise_for_status()
-        data = r.json()
+        try:
+            r = requests.get(f"{self.base}/getMe", timeout=10)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            raise RuntimeError(f"Telegram getMe failed: {self._format_error(e)}") from None
         if data.get("ok") is not True:
             raise RuntimeError(f"Telegram getMe failed: {data}")
         result = data.get("result") or {}
@@ -102,9 +120,9 @@ class TelegramClient:
                 data = r.json()
                 if data.get("ok") is True:
                     return True, "ok"
-                last_err = f"telegram_api_error: {data}"
+                last_err = self._format_api_error(data)
             except Exception as e:
-                last_err = repr(e)
+                last_err = self._format_error(e)
             if attempt < 2:
                 import time
                 time.sleep(0.8 * (attempt + 1))
@@ -135,9 +153,9 @@ class TelegramClient:
                 if data.get("ok") is True:
                     result = data.get("result") or {}
                     return True, "ok", int(result.get("message_id") or 0)
-                last_err = f"telegram_api_error: {data}"
+                last_err = self._format_api_error(data)
             except Exception as e:
-                last_err = repr(e)
+                last_err = self._format_error(e)
             if attempt < 2:
                 import time
                 time.sleep(0.8 * (attempt + 1))
@@ -170,9 +188,9 @@ class TelegramClient:
                 data = r.json()
                 if data.get("ok") is True:
                     return True, "ok"
-                last_err = f"telegram_api_error: {data}"
+                last_err = self._format_api_error(data)
             except Exception as e:
-                last_err = repr(e)
+                last_err = self._format_error(e)
             if attempt == 0:
                 import time
                 time.sleep(0.4)
@@ -197,9 +215,9 @@ class TelegramClient:
             data = r.json()
             if data.get("ok") is True:
                 return True, "ok"
-            last_err = f"telegram_api_error: {data}"
+            last_err = self._format_api_error(data)
         except Exception as e:
-            last_err = repr(e)
+            last_err = self._format_error(e)
         return False, last_err
 
     def send_chat_action(self, chat_id: int, action: str = "typing") -> bool:
@@ -211,8 +229,8 @@ class TelegramClient:
                 timeout=5,
             )
             return r.status_code == 200
-        except Exception:
-            log.debug("Failed to send chat action to chat_id=%d", chat_id, exc_info=True)
+        except Exception as e:
+            log.debug("Failed to send chat action to chat_id=%d: %s", chat_id, self._format_error(e))
             return False
 
     def send_photo(self, chat_id: int, photo_bytes: bytes,
@@ -233,9 +251,9 @@ class TelegramClient:
                 resp = r.json()
                 if resp.get("ok") is True:
                     return True, "ok"
-                last_err = f"telegram_api_error: {resp}"
+                last_err = self._format_api_error(resp)
             except Exception as e:
-                last_err = repr(e)
+                last_err = self._format_error(e)
             if attempt < 2:
                 import time
                 time.sleep(0.8 * (attempt + 1))
@@ -267,9 +285,9 @@ class TelegramClient:
                 resp = r.json()
                 if resp.get("ok") is True:
                     return True, "ok"
-                last_err = f"telegram_api_error: {resp}"
+                last_err = self._format_api_error(resp)
             except Exception as e:
-                last_err = repr(e)
+                last_err = self._format_error(e)
             if attempt < 2:
                 import time
                 time.sleep(0.8 * (attempt + 1))
@@ -299,8 +317,8 @@ class TelegramClient:
             mime = mime_map.get(ext, "application/octet-stream")
 
             return r2.content, mime, file_path
-        except Exception:
-            log.warning("Failed to download file_id=%s from Telegram", file_id, exc_info=True)
+        except Exception as e:
+            log.warning("Failed to download file_id=%s from Telegram: %s", file_id, self._format_error(e))
             return None, "", ""
 
     def download_file_base64(self, file_id: str, max_bytes: int = 10_000_000) -> Tuple[Optional[str], str]:

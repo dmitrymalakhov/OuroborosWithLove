@@ -100,6 +100,7 @@ def test_teamchat_runtime_force_callback_can_override_terminal_decision():
         def __init__(self):
             self.callbacks = []
             self.edits = []
+            self.sent = []
 
         def answer_callback_query(self, callback_query_id, text="", show_alert=False):
             self.callbacks.append((callback_query_id, text, show_alert))
@@ -130,6 +131,9 @@ def test_teamchat_runtime_force_callback_can_override_terminal_decision():
             append_jsonl_fn=lambda *args, **kwargs: None,
         )
 
+        sent = []
+        runtime.send_with_budget_fn = lambda *args, **kwargs: sent.append((args, kwargs))
+
         handled = runtime.handle_callback({
             "id": "cb1",
             "data": "teamchat:approve:-100123:force",
@@ -140,6 +144,9 @@ def test_teamchat_runtime_force_callback_can_override_terminal_decision():
         assert handled is True
         assert get_team_chat(drive_root, -100123)["status"] == TEAM_APPROVED
         assert tg.callbacks and "Группа разрешена" in tg.callbacks[-1][1]
+        assert sent
+        assert sent[0][0][0] == -100123
+        assert "/ask" in sent[0][0][1]
 
 
 def test_team_member_seen_is_stored():
@@ -162,12 +169,14 @@ def test_team_member_seen_is_stored():
 
 def test_team_inbox_tools_require_team_context_and_roundtrip():
     from ouroboros.tools.registry import ToolContext
-    from ouroboros.tools.team import _team_inbox_read, _team_inbox_send
+    from ouroboros.tools.team import _team_chat_history, _team_chat_search, _team_inbox_read, _team_inbox_send
+    from ouroboros.utils import append_jsonl
 
     with tempfile.TemporaryDirectory() as tmp:
         drive_root = pathlib.Path(tmp)
         ctx = ToolContext(repo_dir=drive_root, drive_root=drive_root)
         assert "only inside" in _team_inbox_read(ctx)
+        assert "only inside" in _team_chat_history(ctx)
 
         team_root = drive_root / "teams" / "tg_100123"
         ctx = ToolContext(
@@ -185,6 +194,35 @@ def test_team_inbox_tools_require_team_context_and_roundtrip():
         output = _team_inbox_read(ctx, limit=5)
         assert "coordinate this" in output
         assert "#plan" in output
+
+        chat_log = team_root / "logs" / "chat.jsonl"
+        chat_log.parent.mkdir(parents=True, exist_ok=True)
+        append_jsonl(chat_log, {
+            "ts": "2026-01-01T00:00:00+00:00",
+            "direction": "in",
+            "chat_id": -100123,
+            "user_id": 42,
+            "text": "Discuss Project Phoenix timeline",
+        })
+        append_jsonl(chat_log, {
+            "ts": "2026-01-01T00:01:00+00:00",
+            "direction": "out",
+            "chat_id": -100123,
+            "user_id": 0,
+            "text": "I can summarize the timeline.",
+        })
+
+        history = _team_chat_history(ctx, limit=2)
+        assert "Project Phoenix" in history
+        assert "I can summarize" in history
+
+        user_only = _team_chat_history(ctx, limit=2, include_bot=False)
+        assert "Project Phoenix" in user_only
+        assert "I can summarize" not in user_only
+
+        search = _team_chat_search(ctx, "phoenix", limit=5)
+        assert "Project Phoenix" in search
+        assert "matches" in search
 
 
 def test_team_context_does_not_include_personal_memory():
@@ -301,13 +339,31 @@ def test_telegram_inline_keyboard_methods(monkeypatch):
     assert err == "ok"
 
 
+def test_telegram_error_redacts_bot_token():
+    from supervisor.telegram import redact_telegram_token
+
+    token = "123456:ABC_SECRET"
+    raw = (
+        "HTTPError('400 Client Error: Bad Request for url: "
+        "https://api.telegram.org/bot123456:ABC_SECRET/editMessageText')"
+    )
+
+    redacted = redact_telegram_token(raw, token)
+
+    assert token not in redacted
+    assert "bot<telegram-token>" in redacted
+
+
 def test_teamchat_trigger_helpers():
-    from supervisor.teamchat import is_group_task_trigger, strip_bot_mention
+    from supervisor.teamchat import is_group_task_trigger, prepare_group_task_text, strip_bot_mention
 
     msg = {"text": "hello"}
     assert is_group_task_trigger(msg, "hello", "", bot_id=10, bot_username="ouro_bot") is False
 
     assert is_group_task_trigger(msg, "/status", "", bot_id=10, bot_username="ouro_bot") is True
+    assert prepare_group_task_text("/ask@ouro_bot hello", "ouro_bot") == "hello"
+    assert prepare_group_task_text("/ouro привет", "ouro_bot") == "привет"
+    assert prepare_group_task_text("/status", "ouro_bot") == "/status"
     assert is_group_task_trigger(msg, "hey @ouro_bot help", "", bot_id=10, bot_username="ouro_bot") is True
     assert is_group_task_trigger(
         {"reply_to_message": {"from": {"id": 10, "username": "ouro_bot"}}},

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import pathlib
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -56,6 +57,21 @@ def parse_access_user_ids(parts: List[str]) -> List[int]:
     return unique
 
 
+def _format_dt(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "-"
+    try:
+        dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return dt.strftime("%d.%m %H:%M")
+    except Exception:
+        if "T" in raw:
+            date, time = raw.split("T", 1)
+            hhmm = time[:5] if len(time) >= 5 else time
+            return f"{date} {hhmm}".strip()
+        return raw[:16]
+
+
 def access_request_keyboard(user_id: int) -> Dict[str, Any]:
     return {
         "inline_keyboard": [
@@ -66,6 +82,58 @@ def access_request_keyboard(user_id: int) -> Dict[str, Any]:
             [{"text": "🛠 Админ-меню", "callback_data": "admin:home"}],
         ]
     }
+
+
+def _user_name(rec: Dict[str, Any]) -> str:
+    first = str(rec.get("first_name") or "").strip()
+    last = str(rec.get("last_name") or "").strip()
+    name = " ".join(part for part in (first, last) if part).strip()
+    username = str(rec.get("username") or "").strip()
+    if name:
+        return name
+    if username:
+        return f"@{username}"
+    return f"id {int(rec.get('user_id') or 0)}"
+
+
+def _user_detail_line(rec: Dict[str, Any], status: str) -> str:
+    username = str(rec.get("username") or "").strip()
+    uid = int(rec.get("user_id") or 0)
+    when = {
+        ACCESS_PENDING: rec.get("access_last_requested_at") or rec.get("access_requested_at"),
+        ACCESS_APPROVED: rec.get("access_approved_at") or rec.get("created_at"),
+        ACCESS_DENIED: rec.get("access_denied_at") or rec.get("created_at"),
+    }.get(status) or rec.get("created_at")
+    date_label = {
+        ACCESS_PENDING: "запрос",
+        ACCESS_APPROVED: "доступ",
+        ACCESS_DENIED: "отключён",
+    }.get(status, "дата")
+    parts = []
+    if username:
+        parts.append(f"@{username}")
+    parts.append(f"id {uid}")
+    parts.append(f"{date_label}: {_format_dt(when)}")
+    return " · ".join(parts)
+
+
+def _team_name(rec: Dict[str, Any]) -> str:
+    return str(rec.get("title") or "").strip() or f"chat {int(rec.get('chat_id') or 0)}"
+
+
+def _team_detail_line(rec: Dict[str, Any], status: str) -> str:
+    chat_id = int(rec.get("chat_id") or 0)
+    when = {
+        TEAM_CHAT_PENDING: rec.get("requested_at") or rec.get("created_at"),
+        TEAM_CHAT_APPROVED: rec.get("approved_at") or rec.get("created_at"),
+        TEAM_CHAT_DENIED: rec.get("denied_at") or rec.get("created_at"),
+    }.get(status) or rec.get("created_at")
+    date_label = {
+        TEAM_CHAT_PENDING: "запрос",
+        TEAM_CHAT_APPROVED: "доступ",
+        TEAM_CHAT_DENIED: "отключена",
+    }.get(status, "дата")
+    return f"chat {chat_id} · {date_label}: {_format_dt(when)}"
 
 
 def access_decision_text(rec: Dict[str, Any]) -> str:
@@ -79,20 +147,6 @@ def access_decision_text(rec: Dict[str, Any]) -> str:
         verdict = "⏳ Ожидает решения"
     suffix = f"\nРешил admin user_id={decided_by}" if decided_by else ""
     return f"{verdict}: {access_user_label(rec)}{suffix}"
-
-
-def _short_button_label(value: str, limit: int = 36) -> str:
-    value = " ".join(str(value or "").split()).strip()
-    if len(value) <= limit:
-        return value
-    return value[: max(1, limit - 1)].rstrip() + "…"
-
-
-def _team_chat_label(rec: Dict[str, Any]) -> str:
-    title = str(rec.get("title") or "").strip() or "(без названия)"
-    chat_id = int(rec.get("chat_id") or 0)
-    status = str(rec.get("status") or TEAM_CHAT_PENDING)
-    return f"{title} (chat_id={chat_id}, status={status})"
 
 
 def collect_admin_chat_ids(drive_root: pathlib.Path, load_state_fn: Callable[[], Dict[str, Any]]) -> List[int]:
@@ -216,13 +270,10 @@ class AccessRuntime:
         pending_count = len(list_user_records(self.drive_root, access_status=ACCESS_PENDING))
         uid = int(rec.get("user_id") or 0)
         body = (
-            "🔐 Новый запрос доступа к боту\n"
-            f"Пользователь: {access_user_label(rec)}\n"
-            f"Pending-запросов сейчас: {pending_count}\n\n"
-            f"Согласовать: /approve {uid}\n"
-            f"Отказать: /deny {uid}\n"
-            "Согласовать всех pending: /approve all\n"
-            "Посмотреть очередь: /access"
+            "🔐 Запрос доступа\n\n"
+            f"{_user_name(rec)}\n"
+            f"{_user_detail_line(rec, ACCESS_PENDING)}\n\n"
+            f"В очереди: {pending_count}"
         )
         sent = 0
         owner_id = int(self.load_state_fn().get("owner_id") or 0) or None
@@ -277,26 +328,25 @@ class AccessRuntime:
     def format_records(self, status: str = ACCESS_PENDING) -> str:
         records = list_user_records(self.drive_root, access_status=status)
         title = {
-            ACCESS_PENDING: "Pending-запросы доступа",
-            ACCESS_APPROVED: "Пользователи с доступом",
-            ACCESS_DENIED: "Пользователи без доступа",
+            ACCESS_PENDING: "👤 Заявки пользователей",
+            ACCESS_APPROVED: "✅ Пользователи с доступом",
+            ACCESS_DENIED: "⛔️ Отключённые пользователи",
         }.get(status, "Пользователи")
         if not records:
             return f"{title}: пусто."
 
-        lines = [f"{title}: {len(records)}"]
-        for rec in records[:30]:
-            requested_at = rec.get("access_requested_at") or rec.get("created_at") or "-"
-            lines.append(f"- {access_user_label(rec)} | requested={requested_at}")
-        if len(records) > 30:
-            lines.append(f"... ещё {len(records) - 30}")
+        visible = records[:20]
+        lines = [f"{title}: {len(records)}", ""]
+        for idx, rec in enumerate(visible, start=1):
+            lines.append(f"{idx}. {_user_name(rec)}")
+            lines.append(f"   {_user_detail_line(rec, status)}")
+        if len(records) > len(visible):
+            lines.append(f"\nПоказаны первые {len(visible)} из {len(records)}.")
         if status == ACCESS_PENDING:
             lines.extend([
                 "",
-                "Команды:",
+                "Быстрые команды:",
                 "/approve all",
-                "/approve <user_id> [user_id...]",
-                "/deny <user_id> [user_id...]",
             ])
         return "\n".join(lines)
 
@@ -308,10 +358,15 @@ class AccessRuntime:
         group_approved = len(list_team_chats(self.drive_root, status=TEAM_CHAT_APPROVED))
         group_denied = len(list_team_chats(self.drive_root, status=TEAM_CHAT_DENIED))
         return (
-            "🛠 Админ-меню Ouroboros\n\n"
-            f"Пользователи: pending {user_pending}, approved {user_approved}, denied {user_denied}\n"
-            f"Группы: pending {group_pending}, approved {group_approved}, denied {group_denied}\n\n"
-            "Выбери раздел ниже."
+            "🛠 Админ-панель\n\n"
+            "Пользователи\n"
+            f"• заявки: {user_pending}\n"
+            f"• с доступом: {user_approved}\n"
+            f"• отключены: {user_denied}\n\n"
+            "Группы\n"
+            f"• заявки: {group_pending}\n"
+            f"• с доступом: {group_approved}\n"
+            f"• отключены: {group_denied}"
         )
 
     def admin_home_keyboard(self) -> Dict[str, Any]:
@@ -323,83 +378,102 @@ class AccessRuntime:
         group_denied = len(list_team_chats(self.drive_root, status=TEAM_CHAT_DENIED))
         return {
             "inline_keyboard": [
-                [{"text": f"👤 User requests ({user_pending})", "callback_data": "admin:users:pending"}],
+                [{"text": f"👤 Заявки: {user_pending}", "callback_data": "admin:users:pending"}],
                 [
-                    {"text": f"✅ Users ({user_approved})", "callback_data": "admin:users:approved"},
-                    {"text": f"⛔️ Users ({user_denied})", "callback_data": "admin:users:denied"},
+                    {"text": f"✅ Доступ: {user_approved}", "callback_data": "admin:users:approved"},
+                    {"text": f"⛔️ Отключены: {user_denied}", "callback_data": "admin:users:denied"},
                 ],
-                [{"text": f"👥 Group requests ({group_pending})", "callback_data": "admin:groups:pending"}],
+                [{"text": f"👥 Заявки групп: {group_pending}", "callback_data": "admin:groups:pending"}],
                 [
-                    {"text": f"✅ Groups ({group_approved})", "callback_data": "admin:groups:approved"},
-                    {"text": f"⛔️ Groups ({group_denied})", "callback_data": "admin:groups:denied"},
+                    {"text": f"✅ Группы: {group_approved}", "callback_data": "admin:groups:approved"},
+                    {"text": f"⛔️ Отключены: {group_denied}", "callback_data": "admin:groups:denied"},
                 ],
                 [{"text": "🔄 Обновить", "callback_data": "admin:home"}],
             ]
         }
 
-    def user_records_keyboard(self, status: str) -> Dict[str, Any]:
-        records = list_user_records(self.drive_root, access_status=status)
+    @staticmethod
+    def _numbered_rows(buttons: List[Dict[str, str]], columns: int = 4) -> List[List[Dict[str, str]]]:
         rows: List[List[Dict[str, str]]] = []
-        for rec in records[:20]:
+        for idx in range(0, len(buttons), columns):
+            rows.append(buttons[idx:idx + columns])
+        return rows
+
+    def user_records_keyboard(self, status: str) -> Dict[str, Any]:
+        records = list_user_records(self.drive_root, access_status=status)[:20]
+        rows: List[List[Dict[str, str]]] = []
+        buttons: List[Dict[str, str]] = []
+        for idx, rec in enumerate(records, start=1):
             uid = int(rec.get("user_id") or 0)
-            label = _short_button_label(access_user_label(rec))
             if status == ACCESS_PENDING:
                 rows.append([
-                    {"text": f"✅ {label}", "callback_data": f"access:approve:{uid}"},
-                    {"text": f"⛔️ {label}", "callback_data": f"access:deny:{uid}"},
+                    {"text": f"✅ {idx}", "callback_data": f"access:approve:{uid}:users:pending"},
+                    {"text": f"⛔️ {idx}", "callback_data": f"access:deny:{uid}:users:pending"},
                 ])
             elif status == ACCESS_APPROVED:
-                rows.append([{"text": f"⛔️ Отключить {label}", "callback_data": f"access:deny:{uid}"}])
+                buttons.append({"text": f"⛔️ {idx}", "callback_data": f"access:deny:{uid}:users:approved"})
             else:
-                rows.append([{"text": f"✅ Разрешить {label}", "callback_data": f"access:approve:{uid}"}])
+                buttons.append({"text": f"✅ {idx}", "callback_data": f"access:approve:{uid}:users:denied"})
+        if buttons:
+            rows.extend(self._numbered_rows(buttons))
         rows.extend([
             [
-                {"text": "Pending", "callback_data": "admin:users:pending"},
-                {"text": "Approved", "callback_data": "admin:users:approved"},
-                {"text": "Denied", "callback_data": "admin:users:denied"},
+                {"text": "Заявки", "callback_data": "admin:users:pending"},
+                {"text": "Доступ", "callback_data": "admin:users:approved"},
+                {"text": "Отключены", "callback_data": "admin:users:denied"},
             ],
-            [{"text": "⬅️ Назад", "callback_data": "admin:home"}],
+            [
+                {"text": "⬅️ Меню", "callback_data": "admin:home"},
+                {"text": "🔄 Обновить", "callback_data": f"admin:users:{status}"},
+            ],
         ])
         return {"inline_keyboard": rows}
 
     def format_team_records(self, status: str) -> str:
         records = list_team_chats(self.drive_root, status=status)
         title = {
-            TEAM_CHAT_PENDING: "Группы ожидают approval",
-            TEAM_CHAT_APPROVED: "Разрешённые группы",
-            TEAM_CHAT_DENIED: "Запрещённые группы",
+            TEAM_CHAT_PENDING: "👥 Заявки групп",
+            TEAM_CHAT_APPROVED: "✅ Группы с доступом",
+            TEAM_CHAT_DENIED: "⛔️ Отключённые группы",
         }.get(status, "Группы")
         if not records:
             return f"{title}: пусто."
-        lines = [f"{title}: {len(records)}"]
-        for rec in records[:30]:
-            lines.append(f"- {_team_chat_label(rec)}")
-        if len(records) > 30:
-            lines.append(f"... ещё {len(records) - 30}")
+        visible = records[:20]
+        lines = [f"{title}: {len(records)}", ""]
+        for idx, rec in enumerate(visible, start=1):
+            lines.append(f"{idx}. {_team_name(rec)}")
+            lines.append(f"   {_team_detail_line(rec, status)}")
+        if len(records) > len(visible):
+            lines.append(f"\nПоказаны первые {len(visible)} из {len(records)}.")
         return "\n".join(lines)
 
     def team_records_keyboard(self, status: str) -> Dict[str, Any]:
-        records = list_team_chats(self.drive_root, status=status)
+        records = list_team_chats(self.drive_root, status=status)[:20]
         rows: List[List[Dict[str, str]]] = []
-        for rec in records[:20]:
+        buttons: List[Dict[str, str]] = []
+        for idx, rec in enumerate(records, start=1):
             chat_id = int(rec.get("chat_id") or 0)
-            label = _short_button_label(str(rec.get("title") or chat_id))
             if status == TEAM_CHAT_PENDING:
                 rows.append([
-                    {"text": f"✅ {label}", "callback_data": f"teamchat:approve:{chat_id}"},
-                    {"text": f"⛔️ {label}", "callback_data": f"teamchat:deny:{chat_id}"},
+                    {"text": f"✅ {idx}", "callback_data": f"teamchat:approve:{chat_id}"},
+                    {"text": f"⛔️ {idx}", "callback_data": f"teamchat:deny:{chat_id}"},
                 ])
             elif status == TEAM_CHAT_APPROVED:
-                rows.append([{"text": f"⛔️ Запретить {label}", "callback_data": f"teamchat:deny:{chat_id}:force"}])
+                buttons.append({"text": f"⛔️ {idx}", "callback_data": f"teamchat:deny:{chat_id}:force"})
             else:
-                rows.append([{"text": f"✅ Разрешить {label}", "callback_data": f"teamchat:approve:{chat_id}:force"}])
+                buttons.append({"text": f"✅ {idx}", "callback_data": f"teamchat:approve:{chat_id}:force"})
+        if buttons:
+            rows.extend(self._numbered_rows(buttons))
         rows.extend([
             [
-                {"text": "Pending", "callback_data": "admin:groups:pending"},
-                {"text": "Approved", "callback_data": "admin:groups:approved"},
-                {"text": "Denied", "callback_data": "admin:groups:denied"},
+                {"text": "Заявки", "callback_data": "admin:groups:pending"},
+                {"text": "Доступ", "callback_data": "admin:groups:approved"},
+                {"text": "Отключены", "callback_data": "admin:groups:denied"},
             ],
-            [{"text": "⬅️ Назад", "callback_data": "admin:home"}],
+            [
+                {"text": "⬅️ Меню", "callback_data": "admin:home"},
+                {"text": "🔄 Обновить", "callback_data": f"admin:groups:{status}"},
+            ],
         ])
         return {"inline_keyboard": rows}
 
@@ -682,7 +756,7 @@ class AccessRuntime:
             return True
 
         parts = data.split(":")
-        if len(parts) != 3 or parts[1] not in ("approve", "deny"):
+        if len(parts) not in (3, 5) or parts[1] not in ("approve", "deny"):
             self._answer_callback(callback_query, "Некорректная кнопка доступа.", show_alert=True)
             return True
         user_ids = parse_access_user_ids([parts[2]])
@@ -698,6 +772,19 @@ class AccessRuntime:
         message_chat = message.get("chat") or {}
         message_chat_id = int(message_chat.get("id") or 0)
         message_id = int(message.get("message_id") or 0)
+        if ok and len(parts) == 5 and parts[3] == "users":
+            status = {
+                "pending": ACCESS_PENDING,
+                "approved": ACCESS_APPROVED,
+                "denied": ACCESS_DENIED,
+            }.get(parts[4])
+            if status:
+                self._edit_or_send_callback_view(
+                    callback_query,
+                    self.format_records(status),
+                    self.user_records_keyboard(status),
+                )
+                return True
         if ok and self.tg is not None and message_chat_id and message_id:
             self.tg.edit_message_text(message_chat_id, message_id, access_decision_text(rec))
         return True

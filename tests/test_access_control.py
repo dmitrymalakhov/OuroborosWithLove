@@ -83,7 +83,7 @@ def test_access_runtime_request_notification_marks_pending():
 
         updated = list_user_records(drive_root, access_status="pending")[0]
         assert updated["access_admin_notified_at"]
-        assert "Новый запрос доступа" in sent[0][0][1]
+        assert "Запрос доступа" in sent[0][0][1]
 
 
 def test_access_runtime_request_notification_uses_inline_keyboard():
@@ -206,8 +206,72 @@ def test_admin_menu_command_sends_user_and_group_sections():
         assert runtime.handle_command("/admin", chat_id=1, admin_user_id=1) is True
 
         assert tg.sent_markup
-        assert "Админ-меню" in tg.sent_markup[0][1]
+        assert "Админ-панель" in tg.sent_markup[0][1]
         keyboard = tg.sent_markup[0][2]["inline_keyboard"]
         callbacks = {button["callback_data"] for row in keyboard for button in row}
         assert "admin:users:pending" in callbacks
         assert "admin:groups:pending" in callbacks
+
+
+def test_admin_user_list_is_numbered_and_keyboard_is_compact():
+    from supervisor.access_control import AccessRuntime
+    from supervisor.users import ACCESS_APPROVED, request_user_access, set_user_access_status
+
+    with tempfile.TemporaryDirectory() as tmp:
+        drive_root = pathlib.Path(tmp)
+        request_user_access(
+            drive_root,
+            user_id=123,
+            chat_id=456,
+            from_user={"username": "alice", "first_name": "Alice", "last_name": "Doe"},
+        )
+        set_user_access_status(drive_root, [123], ACCESS_APPROVED, decided_by=1)
+        runtime = AccessRuntime(
+            drive_root=drive_root,
+            admin_chat_ids_fn=lambda: [1],
+            load_state_fn=lambda: {"owner_id": 1},
+            send_with_budget_fn=lambda *args, **kwargs: None,
+        )
+
+        text = runtime.format_records(ACCESS_APPROVED)
+        keyboard = runtime.user_records_keyboard(ACCESS_APPROVED)
+        button_texts = [button["text"] for row in keyboard["inline_keyboard"] for button in row]
+
+        assert "1. Alice Doe" in text
+        assert "@alice · id 123" in text
+        assert "requested=" not in text
+        assert "T" not in text
+        assert "⛔️ 1" in button_texts
+        assert all(len(label) <= 16 for label in button_texts)
+
+
+def test_access_runtime_list_callback_refreshes_same_view():
+    from supervisor.access_control import AccessRuntime
+    from supervisor.users import ACCESS_APPROVED, list_user_records, request_user_access, set_user_access_status
+
+    with tempfile.TemporaryDirectory() as tmp:
+        drive_root = pathlib.Path(tmp)
+        request_user_access(drive_root, user_id=123, chat_id=456, from_user={"username": "alice"})
+        set_user_access_status(drive_root, [123], ACCESS_APPROVED, decided_by=1)
+        tg = FakeAccessTG()
+        sent = []
+        runtime = AccessRuntime(
+            drive_root=drive_root,
+            admin_chat_ids_fn=lambda: [1],
+            load_state_fn=lambda: {"owner_id": 1},
+            send_with_budget_fn=lambda *args, **kwargs: sent.append((args, kwargs)),
+            tg=tg,
+            is_admin_user_fn=lambda user_id, st: user_id == 1,
+        )
+
+        handled = runtime.handle_callback({
+            "id": "cb1",
+            "data": "access:deny:123:users:approved",
+            "from": {"id": 1},
+            "message": {"chat": {"id": 1}, "message_id": 77},
+        })
+
+        assert handled is True
+        assert list_user_records(drive_root, access_status=ACCESS_APPROVED) == []
+        assert tg.edits
+        assert "Пользователи с доступом: пусто." in tg.edits[-1][2]

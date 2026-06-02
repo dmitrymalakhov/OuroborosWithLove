@@ -1,6 +1,6 @@
 import json
 
-from supervisor.telegram import save_incoming_document
+from supervisor.telegram import save_incoming_audio, save_incoming_document
 
 
 def test_save_incoming_document_writes_to_uploads_and_logs(tmp_path):
@@ -52,3 +52,31 @@ def test_save_incoming_document_deduplicates_same_message_filename(tmp_path):
     assert "/" in first["path"]
     assert (tmp_path / first["path"]).read_bytes() == b"first"
     assert (tmp_path / second["path"]).read_bytes() == b"second"
+
+
+def test_save_incoming_audio_writes_upload_and_logs_audio_metadata(tmp_path):
+    meta = save_incoming_audio(
+        tmp_path,
+        file_bytes=b"OggS voice bytes",
+        original_name="telegram_voice_99.ogg",
+        mime_type="audio/ogg",
+        telegram_file_id="voice-file",
+        telegram_file_unique_id="voice-unique",
+        message_id=99,
+        attachment_type="voice",
+        duration_sec=12,
+    )
+
+    saved = tmp_path / meta["path"]
+    assert saved.exists()
+    assert saved.read_bytes() == b"OggS voice bytes"
+    assert meta["type"] == "telegram_audio_saved"
+    assert meta["attachment_type"] == "voice"
+    assert meta["duration_sec"] == 12
+    assert str(meta["path"]).startswith("uploads/")
+    assert str(meta["path"]).endswith("_telegram_voice_99.ogg")
+
+    upload_logs = (tmp_path / "logs" / "uploads.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    logged = json.loads(upload_logs[0])
+    assert logged["type"] == "telegram_audio_saved"
+    assert logged["telegram_file_unique_id"] == "voice-unique"

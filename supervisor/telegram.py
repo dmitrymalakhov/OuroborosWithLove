@@ -29,6 +29,26 @@ TOTAL_BUDGET_LIMIT: float = 0.0
 BUDGET_REPORT_EVERY_MESSAGES: int = 10
 _TG: Optional["TelegramClient"] = None
 
+_MIME_BY_EXTENSION = {
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    "bmp": "image/bmp",
+    "pdf": "application/pdf",
+    "flac": "audio/flac",
+    "mp3": "audio/mpeg",
+    "mp4": "audio/mp4",
+    "mpeg": "audio/mpeg",
+    "mpga": "audio/mpeg",
+    "m4a": "audio/mp4",
+    "oga": "audio/ogg",
+    "ogg": "audio/ogg",
+    "wav": "audio/wav",
+    "webm": "audio/webm",
+}
+
 
 def redact_telegram_token(text: str, token: str = "") -> str:
     safe = str(text or "")
@@ -311,10 +331,9 @@ class TelegramClient:
             r2.raise_for_status()
 
             ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
-            mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-                        "gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp",
-                        "pdf": "application/pdf"}
-            mime = mime_map.get(ext, "application/octet-stream")
+            mime = _MIME_BY_EXTENSION.get(ext, "application/octet-stream")
+            if len(r2.content) > max_bytes:
+                return None, mime, file_path
 
             return r2.content, mime, file_path
         except Exception as e:
@@ -348,7 +367,7 @@ def _safe_upload_filename(name: str, fallback: str = "telegram_file") -> str:
     return name
 
 
-def save_incoming_document(
+def _save_incoming_upload(
     drive_root: pathlib.Path,
     *,
     file_bytes: bytes,
@@ -358,14 +377,17 @@ def save_incoming_document(
     telegram_file_unique_id: str = "",
     caption: str = "",
     message_id: int = 0,
+    event_type: str,
+    fallback_name: str,
+    extra_meta: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Persist a Telegram document in the user's workspace and return metadata."""
+    """Persist a Telegram upload in the user's workspace and return metadata."""
     root = pathlib.Path(drive_root)
     day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     upload_dir = root / "uploads" / day
     upload_dir.mkdir(parents=True, exist_ok=True)
 
-    safe_name = _safe_upload_filename(original_name)
+    safe_name = _safe_upload_filename(original_name, fallback=fallback_name)
     prefix = str(int(message_id)) if message_id else datetime.datetime.now(datetime.timezone.utc).strftime("%H%M%S")
     rel_path = pathlib.PurePosixPath("uploads") / day / f"{prefix}_{safe_name}"
     path = root / rel_path
@@ -380,7 +402,7 @@ def save_incoming_document(
     path.write_bytes(file_bytes)
     meta = {
         "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "type": "telegram_document_saved",
+        "type": event_type,
         "path": str(rel_path),
         "filename": safe_name,
         "original_name": original_name or safe_name,
@@ -391,8 +413,68 @@ def save_incoming_document(
         "caption": caption,
         "message_id": message_id,
     }
+    if extra_meta:
+        meta.update(extra_meta)
     append_jsonl(root / "logs" / "uploads.jsonl", meta)
     return meta
+
+
+def save_incoming_document(
+    drive_root: pathlib.Path,
+    *,
+    file_bytes: bytes,
+    original_name: str,
+    mime_type: str,
+    telegram_file_id: str,
+    telegram_file_unique_id: str = "",
+    caption: str = "",
+    message_id: int = 0,
+) -> Dict[str, Any]:
+    """Persist a Telegram document in the user's workspace and return metadata."""
+    return _save_incoming_upload(
+        drive_root,
+        file_bytes=file_bytes,
+        original_name=original_name,
+        mime_type=mime_type,
+        telegram_file_id=telegram_file_id,
+        telegram_file_unique_id=telegram_file_unique_id,
+        caption=caption,
+        message_id=message_id,
+        event_type="telegram_document_saved",
+        fallback_name="telegram_file",
+    )
+
+
+def save_incoming_audio(
+    drive_root: pathlib.Path,
+    *,
+    file_bytes: bytes,
+    original_name: str,
+    mime_type: str,
+    telegram_file_id: str,
+    telegram_file_unique_id: str = "",
+    caption: str = "",
+    message_id: int = 0,
+    attachment_type: str = "audio",
+    duration_sec: int = 0,
+) -> Dict[str, Any]:
+    """Persist a Telegram voice/audio upload in the user's workspace and return metadata."""
+    return _save_incoming_upload(
+        drive_root,
+        file_bytes=file_bytes,
+        original_name=original_name,
+        mime_type=mime_type,
+        telegram_file_id=telegram_file_id,
+        telegram_file_unique_id=telegram_file_unique_id,
+        caption=caption,
+        message_id=message_id,
+        event_type="telegram_audio_saved",
+        fallback_name="telegram_audio.ogg",
+        extra_meta={
+            "attachment_type": str(attachment_type or "audio"),
+            "duration_sec": int(duration_sec or 0),
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

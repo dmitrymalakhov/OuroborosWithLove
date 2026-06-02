@@ -197,6 +197,15 @@ DIAG_SLOW_CYCLE_SEC = _parse_int_cfg(
     default=20,
     minimum=0,
 )
+AUDIO_TRANSCRIPTION_ENABLED = _env_flag("OUROBOROS_TRANSCRIBE_AUDIO", default=True)
+AUDIO_TRANSCRIPTION_MODEL = get_cfg("OUROBOROS_TRANSCRIPTION_MODEL", default="whisper-1", allow_legacy_secret=True) or "whisper-1"
+AUDIO_TRANSCRIPTION_LANGUAGE = get_cfg("OUROBOROS_TRANSCRIPTION_LANGUAGE", default="", allow_legacy_secret=True) or ""
+AUDIO_TRANSCRIPTION_PROMPT = get_cfg("OUROBOROS_TRANSCRIPTION_PROMPT", default="", allow_legacy_secret=True) or ""
+AUDIO_TRANSCRIPTION_MAX_BYTES = _parse_int_cfg(
+    get_cfg("OUROBOROS_TRANSCRIPTION_MAX_BYTES", default="25000000", allow_legacy_secret=True),
+    default=25_000_000,
+    minimum=1,
+)
 
 os.environ["OUROBOROS_LLM_PROVIDER"] = LLM_PROVIDER
 os.environ["OPENROUTER_API_KEY"] = str(OPENROUTER_API_KEY or "")
@@ -214,6 +223,9 @@ os.environ["OUROBOROS_DISABLE_CLAUDE_CODE_EDIT"] = str(DISABLE_CLAUDE_CODE_EDIT)
 os.environ["OUROBOROS_DIAG_HEARTBEAT_SEC"] = str(DIAG_HEARTBEAT_SEC)
 os.environ["OUROBOROS_DIAG_SLOW_CYCLE_SEC"] = str(DIAG_SLOW_CYCLE_SEC)
 os.environ["TELEGRAM_BOT_TOKEN"] = str(TELEGRAM_BOT_TOKEN)
+os.environ["OUROBOROS_TRANSCRIPTION_MODEL"] = str(AUDIO_TRANSCRIPTION_MODEL)
+if AUDIO_TRANSCRIPTION_LANGUAGE:
+    os.environ["OUROBOROS_TRANSCRIPTION_LANGUAGE"] = str(AUDIO_TRANSCRIPTION_LANGUAGE)
 
 if str(ANTHROPIC_API_KEY or "").strip() and str(DISABLE_CLAUDE_CODE_EDIT).strip().lower() not in ("1", "true", "yes", "on"):
     ensure_claude_code_cli()
@@ -309,8 +321,18 @@ teams_init(DRIVE_ROOT)
 from supervisor.teamchat import TeamChatRuntime
 
 from supervisor.telegram import (
-    init as telegram_init, TelegramClient, send_with_budget, log_chat,
+    TelegramClient,
+    init as telegram_init,
+    log_chat,
+    save_incoming_audio,
     save_incoming_document,
+    send_with_budget,
+)
+from supervisor.transcription import (
+    audio_upload_name,
+    format_audio_task_text,
+    is_audio_attachment,
+    transcribe_audio_file,
 )
 TG = TelegramClient(str(TELEGRAM_BOT_TOKEN))
 try:
@@ -405,6 +427,9 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
     "approved_user_ids_count": len(APPROVED_USER_IDS),
     "diag_heartbeat_sec": DIAG_HEARTBEAT_SEC,
     "diag_slow_cycle_sec": DIAG_SLOW_CYCLE_SEC,
+    "audio_transcription_enabled": AUDIO_TRANSCRIPTION_ENABLED,
+    "audio_transcription_model": AUDIO_TRANSCRIPTION_MODEL,
+    "audio_transcription_language": AUDIO_TRANSCRIPTION_LANGUAGE,
     "telegram_bot_username": BOT_USERNAME,
     "telegram_can_read_all_group_messages": _BOT_INFO.get("can_read_all_group_messages"),
 })
@@ -615,15 +640,26 @@ while True:
         # Extract attachment metadata first; actual downloads happen only after
         # the workspace has been resolved and approved.
         image_file_id = ""
+        pending_audio = None
+        pending_audio_type = ""
         pending_document = None
         if msg.get("photo"):
             best_photo = msg["photo"][-1]
             image_file_id = str(best_photo.get("file_id") or "")
+        elif msg.get("voice"):
+            pending_audio = msg["voice"]
+            pending_audio_type = "voice"
+        elif msg.get("audio"):
+            pending_audio = msg["audio"]
+            pending_audio_type = "audio"
         elif msg.get("document"):
             doc = msg["document"]
             mime_type = str(doc.get("mime_type") or "")
             if mime_type.startswith("image/"):
                 image_file_id = str(doc.get("file_id") or "")
+            elif is_audio_attachment(doc):
+                pending_audio = doc
+                pending_audio_type = "document_audio"
             else:
                 pending_document = doc
 
@@ -743,6 +779,97 @@ while True:
             if b64:
                 image_data = (b64, mime, caption)
 
+        saved_audio = None
+        audio_transcription = ""
+        audio_download_failed = False
+        audio_transcription_failed = False
+        audio_transcription_error = ""
+        if pending_audio is not None:
+            file_id = str(pending_audio.get("file_id") or "")
+            if file_id:
+                file_bytes, detected_mime, telegram_path = TG.download_file_bytes(
+                    file_id,
+                    max_bytes=AUDIO_TRANSCRIPTION_MAX_BYTES,
+                )
+                if file_bytes is not None:
+                    duration_sec = int(pending_audio.get("duration") or 0)
+                    saved_audio = save_incoming_audio(
+                        user_drive_root,
+                        file_bytes=file_bytes,
+                        original_name=audio_upload_name(
+                            pending_audio,
+                            attachment_type=pending_audio_type,
+                            message_id=int(msg.get("message_id") or 0),
+                            telegram_path=telegram_path,
+                        ),
+                        mime_type=str(pending_audio.get("mime_type") or detected_mime or ""),
+                        telegram_file_id=file_id,
+                        telegram_file_unique_id=str(pending_audio.get("file_unique_id") or ""),
+                        caption=caption,
+                        message_id=int(msg.get("message_id") or 0),
+                        attachment_type=pending_audio_type,
+                        duration_sec=duration_sec,
+                    )
+                    append_jsonl(user_drive_root / "logs" / "events.jsonl", {
+                        "ts": now_iso,
+                        "type": "telegram_audio_saved",
+                        "path": saved_audio.get("path"),
+                        "mime_type": saved_audio.get("mime_type"),
+                        "size_bytes": saved_audio.get("size_bytes"),
+                        "duration_sec": saved_audio.get("duration_sec"),
+                        "attachment_type": saved_audio.get("attachment_type"),
+                    })
+                    if AUDIO_TRANSCRIPTION_ENABLED:
+                        try:
+                            TG.send_chat_action(chat_id, "typing")
+                            audio_path = user_drive_root / str(saved_audio["path"])
+                            audio_transcription = transcribe_audio_file(
+                                audio_path,
+                                model=AUDIO_TRANSCRIPTION_MODEL,
+                                language=AUDIO_TRANSCRIPTION_LANGUAGE,
+                                prompt=AUDIO_TRANSCRIPTION_PROMPT,
+                            )
+                            transcript_path = audio_path.with_name(audio_path.name + ".transcript.txt")
+                            transcript_path.write_text(audio_transcription, encoding="utf-8")
+                            saved_audio["transcript_path"] = str(transcript_path.relative_to(user_drive_root))
+                            append_jsonl(user_drive_root / "logs" / "events.jsonl", {
+                                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                "type": "telegram_audio_transcribed",
+                                "path": saved_audio.get("path"),
+                                "transcript_path": saved_audio.get("transcript_path"),
+                                "model": AUDIO_TRANSCRIPTION_MODEL,
+                                "transcript_chars": len(audio_transcription),
+                                "duration_sec": saved_audio.get("duration_sec"),
+                            })
+                        except Exception as e:
+                            audio_transcription_failed = True
+                            audio_transcription_error = f"{type(e).__name__}: {e}"[:1000]
+                            append_jsonl(user_drive_root / "logs" / "events.jsonl", {
+                                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                "type": "telegram_audio_transcription_failed",
+                                "path": saved_audio.get("path"),
+                                "model": AUDIO_TRANSCRIPTION_MODEL,
+                                "error": audio_transcription_error,
+                            })
+                    else:
+                        audio_transcription_failed = True
+                        audio_transcription_error = "audio transcription disabled"
+                        append_jsonl(user_drive_root / "logs" / "events.jsonl", {
+                            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            "type": "telegram_audio_transcription_disabled",
+                            "path": saved_audio.get("path"),
+                        })
+                else:
+                    append_jsonl(user_drive_root / "logs" / "events.jsonl", {
+                        "ts": now_iso,
+                        "type": "telegram_audio_download_failed",
+                        "attachment_type": pending_audio_type,
+                        "mime_type": str(pending_audio.get("mime_type") or ""),
+                    })
+                    audio_download_failed = True
+            else:
+                audio_download_failed = True
+
         saved_document = None
         document_download_failed = False
         if pending_document is not None:
@@ -779,7 +906,18 @@ while True:
                 document_download_failed = True
 
         log_text = text
-        if saved_document:
+        if saved_audio and not audio_transcription_failed:
+            log_text = (text or caption or "") + (
+                f"\n[attached audio transcribed: {saved_audio['path']}]\n{audio_transcription}"
+            )
+        elif saved_audio and audio_transcription_failed:
+            log_text = (text or caption or "") + (
+                f"\n[attached audio saved: {saved_audio['path']}]\n"
+                f"[audio transcription failed: {audio_transcription_error}]"
+            )
+        elif audio_download_failed:
+            log_text = (text or caption or "") + "\n[attached audio download failed]"
+        elif saved_document:
             log_text = (text or caption or "") + f"\n[attached document saved: {saved_document['path']}]"
         elif document_download_failed:
             log_text = (text or caption or "") + "\n[attached document download failed]"
@@ -793,10 +931,13 @@ while True:
         _last_message_ts = time.time()
         save_state(st)
 
-        if is_team_chat and not _teamchat.is_group_task_trigger(msg, text, caption):
+        team_trigger_text = text
+        if is_team_chat and not team_trigger_text and audio_transcription:
+            team_trigger_text = audio_transcription
+        if is_team_chat and not _teamchat.is_group_task_trigger(msg, team_trigger_text, caption):
             continue
-        if is_team_chat and text:
-            text = _teamchat.prepare_group_task_text(text)
+        if is_team_chat and team_trigger_text:
+            text = _teamchat.prepare_group_task_text(team_trigger_text)
 
         if not is_team_chat and user_created and not is_admin and text.strip().lower().startswith("/start"):
             send_with_budget(
@@ -846,16 +987,37 @@ while True:
                 log_user_id=user_id,
             )
             continue
+        if audio_download_failed:
+            send_with_budget(
+                chat_id,
+                "⚠️ Не смог скачать голосовое/аудио из Telegram. Пришли его ещё раз.",
+                log_drive_root=user_drive_root,
+                log_user_id=user_id,
+            )
+            continue
+        if saved_audio and audio_transcription_failed:
+            detail = f"\nПричина: {audio_transcription_error}" if is_admin and audio_transcription_error else ""
+            send_with_budget(
+                chat_id,
+                "⚠️ Аудиофайл сохранил, но не смог распознать через OpenAI Whisper." + detail,
+                log_drive_root=user_drive_root,
+                log_user_id=user_id,
+            )
+            continue
 
         # All other messages (and dual-path commands) → direct chat with Ouroboros
-        if not text and not image_data and not saved_document:
+        if not text and not image_data and not saved_document and not saved_audio:
             continue  # empty message, skip
 
         # Feed observation to consciousness
         if is_admin:
-            _consciousness.inject_observation(f"Owner message: {text[:100]}")
+            observation = text or audio_transcription
+            _consciousness.inject_observation(f"Owner message: {observation[:100]}")
 
         agent = _get_chat_agent(user_id=user_id, drive_root=user_drive_root, user_role=user_role)
+        audio_note = ""
+        if saved_audio:
+            audio_note = format_audio_task_text(text, caption, saved_audio, audio_transcription)
 
         if agent._busy or getattr(agent, "_dispatching", False):
             # BUSY PATH: inject into active conversation (single consumer)
@@ -868,6 +1030,15 @@ while True:
                     log_drive_root=user_drive_root,
                     log_user_id=user_id,
                 )
+            elif saved_audio:
+                send_with_budget(
+                    chat_id,
+                    f"🎙️ Аудио распознано: {saved_audio['filename']}. Добавил текст к текущей задаче.",
+                    is_progress=True,
+                    log_drive_root=user_drive_root,
+                    log_user_id=user_id,
+                )
+                agent.inject_message(audio_note)
             elif saved_document:
                 send_with_budget(
                     chat_id,
@@ -895,7 +1066,16 @@ while True:
             # into the same conversation instead of launching a parallel task.
             agent._dispatching = True
             final_text = text
-            if saved_document:
+            if saved_audio:
+                send_with_budget(
+                    chat_id,
+                    f"🎙️ Аудио распознано: {saved_audio['filename']}. Сейчас отвечу по тексту.",
+                    is_progress=True,
+                    log_drive_root=user_drive_root,
+                    log_user_id=user_id,
+                )
+                final_text = audio_note
+            elif saved_document:
                 send_with_budget(
                     chat_id,
                     f"📎 Файл получил: {saved_document['filename']}. Сохранил в workspace, сейчас открою и разберу содержимое.",

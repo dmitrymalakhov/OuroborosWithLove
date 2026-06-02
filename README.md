@@ -36,6 +36,7 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 - **Multi-User Telegram Mode** -- Admins keep full control while regular users get isolated memory, logs, and task context.
 - **OpenAI or OpenRouter** -- Run directly on OpenAI models or route across providers through OpenRouter.
 - **Document Analysis** -- Saves Telegram document uploads and extracts PDF, PPTX, DOCX, and text-like files for summaries, critique, Q&A, and task extraction.
+- **Voice Input** -- Saves Telegram voice/audio uploads and transcribes them through OpenAI Whisper before handing text to the agent.
 - **Product Workflows** -- Turns the autonomous core into practical team workflows: documents, presentations, browser tasks, file delivery, and role-aware tool access.
 - **Constitution** -- Governed by [BIBLE.md](BIBLE.md) (9 philosophical principles). Philosophy first, code second.
 - **Background Consciousness** -- Thinks between tasks. Has an inner life. Not reactive -- proactive.
@@ -111,7 +112,7 @@ ouroboros/                          (agent core)
 | `TELEGRAM_BOT_TOKEN` | Yes | [@BotFather](https://t.me/BotFather) on Telegram (see Step 1) |
 | `TOTAL_BUDGET` | Yes | Your spending limit in USD (e.g. `50`) |
 | `GITHUB_TOKEN` | Required unless `OUROBOROS_DISABLE_SELF_MODIFICATION=1` | [github.com/settings/tokens](https://github.com/settings/tokens) -- Generate a classic token with `repo` scope |
-| `OPENAI_API_KEY` | Required for `OUROBOROS_LLM_PROVIDER=openai`; otherwise optional | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) -- Enables direct OpenAI LLM calls and web search |
+| `OPENAI_API_KEY` | Required for `OUROBOROS_LLM_PROVIDER=openai`; required for voice transcription; otherwise optional | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) -- Enables direct OpenAI LLM calls, web search, and Whisper transcription |
 | `ANTHROPIC_API_KEY` | No | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) -- Enables Claude Code CLI |
 
 ### Step 3: Set Up Google Colab
@@ -141,6 +142,10 @@ CFG = {
     "OUROBOROS_WEBSEARCH_MODEL": "gpt-5",                        # web search (OpenAI Responses API)
     # Fallback chain (first model != active will be used on empty response)
     "OUROBOROS_MODEL_FALLBACK_LIST": "anthropic/claude-sonnet-4.6,google/gemini-3-pro-preview,openai/gpt-4.1",
+    # Telegram voice/audio transcription
+    "OUROBOROS_TRANSCRIBE_AUDIO": "1",
+    "OUROBOROS_TRANSCRIPTION_MODEL": "whisper-1",
+    "OUROBOROS_TRANSCRIPTION_LANGUAGE": "",                         # optional ISO-639-1 code, e.g. "ru"
     # Infrastructure
     "OUROBOROS_MAX_WORKERS": "5",
     "OUROBOROS_MAX_ROUNDS": "200",                               # max LLM rounds per task
@@ -170,6 +175,8 @@ Open your Telegram bot and send any message. If `OUROBOROS_ADMIN_USER_IDS` is em
 Other Telegram users request access first. Admins receive the request in Telegram with inline approve/deny buttons, or can run `/admin`, `/approve <user_id>`, `/deny <user_id>`, or `/approve all`. Once approved, each user gets a separate memory/log workspace under `users/<telegram_user_id>/`, while admin-only tools such as shell, git, evolution, restart, and model switching remain restricted. Existing users already present in `state/users.json` keep access after upgrade.
 
 You can also send documents directly in Telegram. PDF, ZIP, PPTX, DOCX, and text-like files are saved into the sender's workspace under `uploads/YYYY-MM-DD/` and become available to `analyze_document`. Long document workflows emit progress messages while files are downloaded, unpacked, and parsed.
+
+Telegram voice messages and audio files are saved under the same `uploads/YYYY-MM-DD/` path and transcribed with OpenAI Whisper (`whisper-1` by default). The transcript is passed to the agent as the user's message, and a `.transcript.txt` sidecar is saved next to the audio file. This requires `OPENAI_API_KEY` even if the main LLM provider is OpenRouter.
 
 **Restarting:** If Colab disconnects or you restart the runtime, just re-run the same cell. Your Ouroboros's evolution is preserved -- all changes are pushed to your fork, and agent state lives on Google Drive.
 
@@ -206,7 +213,7 @@ Ouroboros exposes its abilities through an auto-discovered tool registry. The LL
 | Files and workspace | `drive_read`, `drive_list`, `drive_write`, `send_file`, `repo_read`, `repo_list` | Read and write user workspace files, send generated CSV/TSV/Markdown/report files back to Telegram, and inspect the repository when allowed. |
 | Document analysis | `analyze_document`, `extract_archive` | Extract PDF, ZIP, PPTX, DOCX, TXT, Markdown, CSV, JSON, HTML, XML, and code-like files for summaries, critique, Q&A, action item extraction, safe archive unpacking, and targeted PDF page ranges such as `15-21,48-55`. |
 | Presentation generation | `create_presentation` | Generate PowerPoint `.pptx` decks from LLM-designed slide outlines, save them in the user's workspace, and queue the finished file for Telegram delivery. |
-| Telegram uploads | runtime upload pipeline + `analyze_document` | Telegram document attachments are stored in `uploads/YYYY-MM-DD/` inside the sender's workspace, then passed to the agent as a readable path. ZIP uploads can be analyzed directly or unpacked first, with visible progress updates for long parsing steps. |
+| Telegram uploads | runtime upload pipeline + `analyze_document` + OpenAI Whisper | Telegram document attachments are stored in `uploads/YYYY-MM-DD/` inside the sender's workspace, then passed to the agent as a readable path. Voice/audio uploads are transcribed before the agent sees them. ZIP uploads can be analyzed directly or unpacked first, with visible progress updates for long parsing steps. |
 | File downloads | `download_url_to_drive` | Download public PDF/ZIP/PPTX/DOCX links into the user's workspace when browser automation only sees a file download prompt. |
 | Web and browser | `web_search`, `browse_page`, `browser_action` | Search the web, open pages, extract text/HTML/Markdown, click/fill/select, scroll, evaluate JavaScript, and take screenshots. |
 | Vision | `analyze_screenshot`, `vlm_query`, `send_photo` | Analyze screenshots or provided images and send generated/collected images back to Telegram. |
@@ -290,7 +297,7 @@ Full text: [BIBLE.md](BIBLE.md)
 | Variable | Description |
 |----------|-------------|
 | `OPENROUTER_API_KEY` | OpenRouter API key for LLM calls when `OUROBOROS_LLM_PROVIDER=openrouter` |
-| `OPENAI_API_KEY` | OpenAI API key when `OUROBOROS_LLM_PROVIDER=openai`; optional web search key otherwise |
+| `OPENAI_API_KEY` | OpenAI API key when `OUROBOROS_LLM_PROVIDER=openai`; also required for voice transcription and OpenAI web search |
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot API token |
 | `TOTAL_BUDGET` | Spending limit in USD |
 | `GITHUB_TOKEN` | GitHub personal access token with `repo` scope. Required for self-modification; optional when `OUROBOROS_DISABLE_SELF_MODIFICATION=1` |
@@ -318,6 +325,11 @@ Full text: [BIBLE.md](BIBLE.md)
 | `OUROBOROS_MODEL_CODE` | `anthropic/claude-sonnet-4.6` via OpenRouter; `gpt-5.2-codex` via OpenAI | Model available for code-heavy tasks |
 | `OUROBOROS_MODEL_LIGHT` | `google/gemini-3-pro-preview` via OpenRouter; `gpt-4.1` via OpenAI | Model for lightweight tasks (dedup, compaction) |
 | `OUROBOROS_WEBSEARCH_MODEL` | `gpt-5` | Model for web search (OpenAI Responses API) |
+| `OUROBOROS_TRANSCRIBE_AUDIO` | `1` | Enable Telegram voice/audio transcription through OpenAI Audio Transcriptions |
+| `OUROBOROS_TRANSCRIPTION_MODEL` | `whisper-1` | OpenAI transcription model for Telegram voice/audio |
+| `OUROBOROS_TRANSCRIPTION_LANGUAGE` | *(empty)* | Optional ISO-639-1 language hint, e.g. `ru`; empty means auto-detect |
+| `OUROBOROS_TRANSCRIPTION_PROMPT` | *(empty)* | Optional prompt to guide transcription vocabulary/style |
+| `OUROBOROS_TRANSCRIPTION_MAX_BYTES` | `25000000` | Maximum Telegram audio file size sent to OpenAI transcription |
 | `OUROBOROS_MAX_WORKERS` | `5` | Maximum number of parallel worker processes |
 | `OUROBOROS_BG_BUDGET_PCT` | `10` | Percentage of total budget allocated to background consciousness |
 | `OUROBOROS_MAX_ROUNDS` | `200` | Maximum LLM rounds per task |

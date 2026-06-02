@@ -94,6 +94,31 @@ def _request_review(ctx: ToolContext, reason: str) -> str:
     return f"Review requested: {reason}"
 
 
+def _offer_improvement_request(
+    ctx: ToolContext,
+    reason: str,
+    summary: str,
+    missing_requirements: str,
+    attempted_steps: str,
+    suggested_creator_action: str,
+) -> str:
+    """Ask the supervisor to offer the user a creator-side improvement request.
+
+    The supervisor sends the user vertical inline buttons after the final answer.
+    Nothing is sent to the creator until the user explicitly confirms.
+    """
+    ctx._pending_improvement_offer = {
+        "reason": reason,
+        "summary": summary,
+        "missing_requirements": missing_requirements,
+        "attempted_steps": attempted_steps,
+        "suggested_creator_action": suggested_creator_action,
+        "ts": utc_now_iso(),
+        **_scope(ctx),
+    }
+    return "OK: improvement request offer queued for the user. It will not be sent to the creator without user confirmation."
+
+
 def _chat_history(ctx: ToolContext, count: int = 100, offset: int = 0, search: str = "") -> str:
     from ouroboros.memory import Memory
     mem = Memory(drive_root=ctx.drive_root)
@@ -256,6 +281,28 @@ def get_tools() -> List[ToolEntry]:
                 "reason": {"type": "string", "description": "Why you want a review (context for the reviewer)"},
             }, "required": ["reason"]},
         }, _request_review),
+        ToolEntry("offer_improvement_request", {
+            "name": "offer_improvement_request",
+            "description": (
+                "Offer the user a vertical-button request for creator-side bot improvement when you believe "
+                "you did not fully solve their task. This only creates a draft and asks the user; "
+                "the creator is notified only if the user presses 'Запросить доработку'. "
+                "Do not include full chat history; summarize what failed and what capability was missing."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "reason": {"type": "string", "description": "What specifically was not solved."},
+                "summary": {"type": "string", "description": "What the user wanted, summarized by the bot."},
+                "missing_requirements": {"type": "string", "description": "What was missing: access, data, file, rights, tool, time, external service, or context."},
+                "attempted_steps": {"type": "string", "description": "What you already tried before deciding the task was not fully solved."},
+                "suggested_creator_action": {"type": "string", "description": "What the creator should improve or inspect."},
+            }, "required": [
+                "reason",
+                "summary",
+                "missing_requirements",
+                "attempted_steps",
+                "suggested_creator_action",
+            ]},
+        }, _offer_improvement_request),
         ToolEntry("chat_history", {
             "name": "chat_history",
             "description": "Retrieve messages from chat history. Supports search.",

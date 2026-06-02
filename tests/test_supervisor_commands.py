@@ -33,6 +33,7 @@ def make_runtime(**overrides):
     defaults = dict(
         access_runtime=NoopApprovalRuntime(),
         teamchat_runtime=NoopApprovalRuntime(),
+        improvement_runtime=NoopApprovalRuntime(),
         load_state_fn=lambda: state,
         save_state_fn=lambda value: state.update(value),
         send_with_budget_fn=lambda *args, **kwargs: sent.append((args, kwargs)),
@@ -100,5 +101,6 @@ def test_admin_only_command_detection():
     assert is_admin_only_command("/admin@ouro_bot")
     assert is_admin_only_command("/approve 123")
     assert is_admin_only_command("/teamchat pending")
+    assert is_admin_only_command("/unresolved")
     assert not is_admin_only_command("/status")
     assert not is_admin_only_command("hello /admin")

@@ -125,6 +125,83 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
         )
 
 
+def _handle_offer_improvement_request(evt: Dict[str, Any], ctx: Any) -> None:
+    """Create a draft improvement request and ask the user for explicit consent."""
+    try:
+        from supervisor.unresolved_tasks import (
+            append_offer_notification,
+            create_draft_report,
+            format_user_offer_text,
+            user_offer_keyboard,
+        )
+
+        chat_id = int(evt.get("chat_id") or 0)
+        if not chat_id:
+            ctx.append_jsonl(
+                ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "improvement_offer_skipped",
+                    "reason": "missing_chat_id",
+                    "task_id": evt.get("task_id"),
+                },
+            )
+            return
+
+        storage_root = _event_shared_drive_root(evt, ctx)
+        rec, _created = create_draft_report(storage_root, {
+            "reason": evt.get("reason"),
+            "summary": evt.get("summary"),
+            "missing_requirements": evt.get("missing_requirements"),
+            "attempted_steps": evt.get("attempted_steps"),
+            "suggested_creator_action": evt.get("suggested_creator_action"),
+            "bot_response_preview": evt.get("bot_response_preview"),
+            "task_id": evt.get("task_id"),
+            "user_id": evt.get("user_id"),
+            "chat_id": chat_id,
+            "chat_type": evt.get("chat_type"),
+            "team_chat_id": evt.get("team_chat_id"),
+            "team_slug": evt.get("team_slug"),
+            "is_team_workspace": evt.get("is_team_workspace"),
+            "drive_root": evt.get("drive_root"),
+            "shared_drive_root": evt.get("shared_drive_root"),
+        })
+
+        if rec.get("offer_notifications"):
+            return
+
+        if ctx.TG is None:
+            return
+        ok, err, message_id = ctx.TG.send_message_with_markup(
+            chat_id,
+            format_user_offer_text(rec),
+            user_offer_keyboard(str(rec.get("id") or "")),
+        )
+        if ok and message_id:
+            append_offer_notification(storage_root, str(rec.get("id") or ""), chat_id=chat_id, message_id=message_id)
+            return
+
+        ctx.append_jsonl(
+            storage_root / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "improvement_offer_send_failed",
+                "chat_id": chat_id,
+                "report_id": rec.get("id"),
+                "error": err,
+            },
+        )
+    except Exception as e:
+        ctx.append_jsonl(
+            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "improvement_offer_event_error",
+                "error": repr(e),
+            },
+        )
+
+
 def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     task_id = evt.get("task_id")
     task_type = str(evt.get("task_type") or "")
@@ -677,6 +754,7 @@ EVENT_HANDLERS = {
     "task_heartbeat": _handle_task_heartbeat,
     "typing_start": _handle_typing_start,
     "send_message": _handle_send_message,
+    "offer_improvement_request": _handle_offer_improvement_request,
     "task_done": _handle_task_done,
     "task_metrics": _handle_task_metrics,
     "review_request": _handle_review_request,

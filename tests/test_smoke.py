@@ -106,6 +106,7 @@ EXPECTED_TOOLS = [
     "create_presentation",
     "web_search",
     "chat_history", "update_scratchpad", "update_identity",
+    "offer_improvement_request",
     "request_restart", "promote_to_stable", "request_review",
     "schedule_task", "cancel_task",
     "switch_model", "toggle_evolution", "toggle_consciousness",

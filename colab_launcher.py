@@ -322,6 +322,7 @@ from supervisor.polls import init as polls_init, handle_poll_update
 polls_init(DRIVE_ROOT)
 
 from supervisor.teamchat import TeamChatRuntime
+from supervisor.unresolved_tasks import ImprovementRequestRuntime
 
 from supervisor.telegram import (
     TelegramClient,
@@ -546,9 +547,21 @@ _teamchat = TeamChatRuntime(
     bot_username=BOT_USERNAME,
 )
 
+_improvements = ImprovementRequestRuntime(
+    drive_root=DRIVE_ROOT,
+    admin_chat_ids_fn=_admin_chat_ids,
+    load_state_fn=load_state,
+    send_with_budget_fn=send_with_budget,
+    tg=TG,
+    is_admin_user_fn=_is_admin_user,
+    log_chat_fn=log_chat,
+    append_jsonl_fn=append_jsonl,
+)
+
 _supervisor_commands = SupervisorCommandRuntime(
     access_runtime=_access,
     teamchat_runtime=_teamchat,
+    improvement_runtime=_improvements,
     load_state_fn=load_state,
     save_state_fn=save_state,
     send_with_budget_fn=send_with_budget,
@@ -625,6 +638,8 @@ while True:
 
         callback_query = upd.get("callback_query")
         if isinstance(callback_query, dict):
+            if _improvements.handle_callback(callback_query):
+                continue
             if _access.handle_callback(callback_query):
                 continue
             if _teamchat.handle_callback(callback_query):

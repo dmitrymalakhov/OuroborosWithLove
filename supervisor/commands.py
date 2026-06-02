@@ -21,6 +21,7 @@ ADMIN_ONLY_COMMANDS = frozenset({
     "/deny",
     "/reject",
     "/teamchat",
+    "/unresolved",
 })
 
 
@@ -36,6 +37,7 @@ def is_admin_only_command(text: str) -> bool:
 class SupervisorCommandRuntime:
     access_runtime: Any
     teamchat_runtime: Any
+    improvement_runtime: Any
     load_state_fn: Callable[[], Dict[str, Any]]
     save_state_fn: Callable[[Dict[str, Any]], None]
     send_with_budget_fn: Callable[..., Any]
@@ -69,6 +71,9 @@ class SupervisorCommandRuntime:
             return True
 
         if self.access_runtime.handle_command(text, chat_id, user_id):
+            return True
+
+        if self.improvement_runtime.handle_command(text, chat_id, user_id):
             return True
 
         if lowered.startswith("/panic"):

@@ -14,6 +14,7 @@ from supervisor.teams import (
     TEAM_PENDING as TEAM_CHAT_PENDING,
     list_team_chats,
 )
+from supervisor.unresolved_tasks import STATUS_IN_PROGRESS, STATUS_OPEN, report_counts
 from supervisor.users import (
     ACCESS_APPROVED,
     ACCESS_DENIED,
@@ -466,6 +467,9 @@ class AccessRuntime:
         group_pending = len(list_team_chats(self.drive_root, status=TEAM_CHAT_PENDING))
         group_approved = len(list_team_chats(self.drive_root, status=TEAM_CHAT_APPROVED))
         group_denied = len(list_team_chats(self.drive_root, status=TEAM_CHAT_DENIED))
+        improvement_counts = report_counts(self.drive_root)
+        improvements_open = improvement_counts.get(STATUS_OPEN, 0)
+        improvements_in_progress = improvement_counts.get(STATUS_IN_PROGRESS, 0)
         return (
             "🛠 Админ-панель\n\n"
             "Пользователи\n"
@@ -475,7 +479,10 @@ class AccessRuntime:
             "Группы\n"
             f"• заявки: {group_pending}\n"
             f"• с доступом: {group_approved}\n"
-            f"• отключены: {group_denied}"
+            f"• отключены: {group_denied}\n\n"
+            "Запросы доработки\n"
+            f"• открытые: {improvements_open}\n"
+            f"• в работе: {improvements_in_progress}"
         )
 
     def admin_home_keyboard(self) -> Dict[str, Any]:
@@ -485,6 +492,8 @@ class AccessRuntime:
         group_pending = len(list_team_chats(self.drive_root, status=TEAM_CHAT_PENDING))
         group_approved = len(list_team_chats(self.drive_root, status=TEAM_CHAT_APPROVED))
         group_denied = len(list_team_chats(self.drive_root, status=TEAM_CHAT_DENIED))
+        improvement_counts = report_counts(self.drive_root)
+        improvements_open = improvement_counts.get(STATUS_OPEN, 0)
         return {
             "inline_keyboard": [
                 [{"text": f"👤 Заявки: {user_pending}", "callback_data": "admin:users:pending"}],
@@ -497,6 +506,7 @@ class AccessRuntime:
                     {"text": f"✅ Группы: {group_approved}", "callback_data": "admin:groups:approved"},
                     {"text": f"⛔️ Отключены: {group_denied}", "callback_data": "admin:groups:denied"},
                 ],
+                [{"text": f"🛠 Доработки: {improvements_open}", "callback_data": "unresolved:list:open"}],
                 [{"text": "🔄 Обновить", "callback_data": "admin:home"}],
             ]
         }

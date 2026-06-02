@@ -518,6 +518,17 @@ class OuroborosAgent:
             **self._event_scope(),
         })
 
+        improvement_offer = getattr(self.tools._ctx, "_pending_improvement_offer", None)
+        if isinstance(improvement_offer, dict):
+            self._pending_events.append({
+                "type": "offer_improvement_request",
+                "task_id": task.get("id"),
+                "bot_response_preview": (text or "")[:4000],
+                "ts": utc_now_iso(),
+                **improvement_offer,
+                **self._event_scope(),
+            })
+
         duration_sec = round(time.time() - start_time, 3)
         n_tool_calls = len(llm_trace.get("tool_calls", []))
         n_tool_errors = sum(1 for tc in llm_trace.get("tool_calls", [])

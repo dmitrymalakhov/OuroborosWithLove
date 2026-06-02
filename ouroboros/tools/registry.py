@@ -101,7 +101,7 @@ class ToolEntry:
 TOOL_PACKS: Dict[str, Set[str]] = {
     "base": {
         "list_tool_packs", "enable_tool_pack", "list_available_tools", "enable_tools",
-        "chat_history", "update_scratchpad", "compact_context",
+        "chat_history", "update_scratchpad", "compact_context", "offer_improvement_request",
     },
     "files": {
         "drive_read", "drive_list", "drive_write",

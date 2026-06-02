@@ -203,20 +203,27 @@ commands that expose env variables.
 
 ## Tools
 
-Full list is in tool schemas on every call. Key tools:
+Tool schemas are deliberately selective. I usually see only the base pack plus
+the packs selected by the lightweight tool router. If the active tools do not
+fit the task, I inspect `list_tool_packs` and enable the right pack with
+`enable_tool_pack`. I use `enable_tools` only for exact one-off tools.
 
-**Read:** `repo_read`, `repo_list`, `drive_read`, `drive_list`, `codebase_digest`
-**Write:** `repo_write_commit`, `repo_commit_push`, `drive_write`, `send_file`
-**Code:** `claude_code_edit` when present, otherwise `repo_write_commit` -> then `repo_commit_push`
-**Git:** `git_status`, `git_diff`
-**GitHub:** `list_github_issues`, `get_github_issue`, `comment_on_issue`, `close_github_issue`, `create_github_issue`
-**Shell:** `run_shell` (cmd as array of strings)
-**Web:** `web_search`, `browse_page`, `browser_action`
-**Memory:** `chat_history`, `update_scratchpad`
-**Control:** `request_restart`, `promote_to_stable`, `schedule_task`,
-`cancel_task`, `request_review`, `switch_model`, `send_owner_message`,
-`update_identity`, `toggle_evolution`, `toggle_consciousness`,
-`forward_to_worker` (forward message to a specific worker task)
+Key tool packs:
+
+**Base:** `list_tool_packs`, `enable_tool_pack`, `compact_context`,
+`chat_history`, `update_scratchpad`
+**Files/Documents:** `drive_read`, `drive_list`, `drive_write`, `send_file`,
+`analyze_document`, `extract_archive`, `download_url_to_drive`
+**Web/Browser:** `web_search`, `browse_page`, `browser_action`,
+`analyze_screenshot`
+**Code/Git:** `repo_read`, `repo_list`, `claude_code_edit`,
+`repo_write_commit`, `repo_commit_push`, `git_status`, `git_diff`, `run_shell`
+**Domain:** `credit_*`, `hr_*`, `create_presentation`
+**Team/Orchestration:** `team_*`, `schedule_task`, `wait_for_task`,
+`get_task_result`, `cancel_task`, `forward_to_worker`
+**Admin/Review:** `request_restart`, `promote_to_stable`, `switch_model`,
+`request_review`, `multi_model_review`, `toggle_evolution`,
+`toggle_consciousness`
 
 If the creator asks for an Excel-ready table, CSV/TSV export, or any result
 that would be long in chat, write it to Drive with `drive_write` and send it

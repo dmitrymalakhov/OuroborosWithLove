@@ -93,7 +93,14 @@ class TelegramClient:
         last_err = "unknown"
         for attempt in range(3):
             try:
-                allowed_updates = ["message", "edited_message", "my_chat_member", "callback_query"]
+                allowed_updates = [
+                    "message",
+                    "edited_message",
+                    "my_chat_member",
+                    "callback_query",
+                    "poll",
+                    "poll_answer",
+                ]
                 r = requests.get(
                     f"{self.base}/getUpdates",
                     params={"offset": offset, "timeout": timeout,
@@ -312,6 +319,63 @@ class TelegramClient:
                 import time
                 time.sleep(0.8 * (attempt + 1))
         return False, last_err
+
+    def send_poll(
+        self,
+        chat_id: int,
+        question: str,
+        options: List[str],
+        *,
+        is_anonymous: bool = False,
+        allows_multiple_answers: bool = False,
+        open_period_seconds: int = 0,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """Send a native Telegram poll and return the sent Message payload."""
+        last_err = "unknown"
+        option_payload = [{"text": str(opt)} for opt in options]
+        for attempt in range(3):
+            try:
+                payload: Dict[str, Any] = {
+                    "chat_id": int(chat_id),
+                    "question": str(question or ""),
+                    "options": json.dumps(option_payload, ensure_ascii=False),
+                    "is_anonymous": bool(is_anonymous),
+                    "allows_multiple_answers": bool(allows_multiple_answers),
+                    "type": "regular",
+                }
+                if open_period_seconds:
+                    payload["open_period"] = int(open_period_seconds)
+                r = requests.post(f"{self.base}/sendPoll", data=payload, timeout=30)
+                r.raise_for_status()
+                data = r.json()
+                if data.get("ok") is True:
+                    return True, "ok", dict(data.get("result") or {})
+                last_err = self._format_api_error(data)
+            except Exception as e:
+                last_err = self._format_error(e)
+            if attempt < 2:
+                import time
+                time.sleep(0.8 * (attempt + 1))
+        return False, last_err, {}
+
+    def stop_poll(self, chat_id: int, message_id: int) -> Tuple[bool, str, Dict[str, Any]]:
+        """Stop a Telegram poll sent by the bot and return the stopped Poll payload."""
+        last_err = "unknown"
+        for attempt in range(3):
+            try:
+                payload = {"chat_id": int(chat_id), "message_id": int(message_id)}
+                r = requests.post(f"{self.base}/stopPoll", data=payload, timeout=30)
+                r.raise_for_status()
+                data = r.json()
+                if data.get("ok") is True:
+                    return True, "ok", dict(data.get("result") or {})
+                last_err = self._format_api_error(data)
+            except Exception as e:
+                last_err = self._format_error(e)
+            if attempt < 2:
+                import time
+                time.sleep(0.8 * (attempt + 1))
+        return False, last_err, {}
 
     def download_file_bytes(self, file_id: str, max_bytes: int = 50_000_000) -> Tuple[Optional[bytes], str, str]:
         """Download a Telegram file and return (bytes, mime_type, telegram_file_path)."""

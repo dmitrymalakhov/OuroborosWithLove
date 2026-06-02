@@ -7,11 +7,10 @@ ToolRegistry collects all tools, provides schemas() and execute().
 
 from __future__ import annotations
 
-import json
 import os
 import pathlib
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from ouroboros.utils import safe_relpath
 
@@ -94,24 +93,121 @@ class ToolEntry:
     handler: Callable  # fn(ctx: ToolContext, **args) -> str
     is_code_tool: bool = False
     timeout_sec: int = 120
+    pack: str = ""
+    tags: Tuple[str, ...] = field(default_factory=tuple)
+    risk_level: str = "normal"
 
 
-CORE_TOOL_NAMES = {
-    "repo_read", "repo_list", "repo_write_commit", "repo_commit_push",
-    "drive_read", "drive_list", "drive_write", "send_file",
-    "run_shell", "claude_code_edit",
-    "git_status", "git_diff",
-    "schedule_task", "wait_for_task", "get_task_result",
-    "update_scratchpad", "update_identity",
-    "chat_history", "web_search",
-    "analyze_document", "extract_archive", "download_url_to_drive",
-    "create_presentation",
-    "send_owner_message", "switch_model",
-    "request_restart", "promote_to_stable",
-    "knowledge_read", "knowledge_write",
-    "browse_page", "browser_action", "analyze_screenshot",
-    "team_inbox_send", "team_inbox_read", "team_chat_history", "team_chat_search", "team_members",
+TOOL_PACKS: Dict[str, Set[str]] = {
+    "base": {
+        "list_tool_packs", "enable_tool_pack", "list_available_tools", "enable_tools",
+        "chat_history", "update_scratchpad", "compact_context",
+    },
+    "files": {
+        "drive_read", "drive_list", "drive_write",
+    },
+    "documents": {
+        "analyze_document", "extract_archive", "download_url_to_drive", "send_file",
+    },
+    "web_browser": {
+        "web_search", "browse_page", "browser_action", "analyze_screenshot",
+        "vlm_query", "send_photo",
+    },
+    "code_git": {
+        "repo_read", "repo_list", "repo_write_commit", "repo_commit_push",
+        "git_status", "git_diff", "run_shell", "claude_code_edit",
+        "codebase_digest",
+    },
+    "memory": {
+        "update_identity", "send_owner_message", "knowledge_read", "knowledge_write",
+        "knowledge_list", "summarize_dialogue",
+    },
+    "orchestration": {
+        "schedule_task", "get_task_result", "wait_for_task", "cancel_task",
+        "forward_to_worker",
+    },
+    "team": {
+        "team_inbox_send", "team_inbox_read", "team_chat_history", "team_chat_search",
+        "team_members", "team_poll_create", "team_poll_results", "team_poll_close",
+    },
+    "presentation": {
+        "create_presentation",
+    },
+    "credit": {
+        "credit_pack_check", "credit_metrics_check", "credit_deck_challenge",
+        "credit_speaker_qna", "credit_committee_readiness", "credit_memo_draft",
+        "credit_deck_outline",
+    },
+    "hr": {
+        "hr_vacancy_audit", "hr_role_profile", "hr_candidate_screen",
+        "hr_interview_kit", "hr_onboarding_checklist",
+    },
+    "health_review": {
+        "request_review", "multi_model_review", "codebase_health",
+        "generate_evolution_stats",
+    },
+    "admin_control": {
+        "request_restart", "promote_to_stable", "toggle_evolution",
+        "toggle_consciousness", "switch_model",
+    },
+    "github": {
+        "list_github_issues", "get_github_issue", "comment_on_issue",
+        "close_github_issue", "create_github_issue",
+    },
 }
+
+
+TOOL_PACK_DESCRIPTIONS: Dict[str, str] = {
+    "base": "Always-on minimal discovery, memory, and context tools.",
+    "files": "Read, list, and write workspace files.",
+    "documents": "Analyze PDFs, archives, office documents, and downloadable files.",
+    "web_browser": "Search the web, browse pages, automate browser actions, and inspect screenshots/images.",
+    "code_git": "Inspect and modify the repository, run shell/code tools, and use git.",
+    "memory": "Persistent memory, knowledge topics, identity, and dialogue summaries.",
+    "orchestration": "Schedule, poll, cancel, and route background tasks.",
+    "team": "Approved Telegram team workspace history, inbox, members, and polls.",
+    "presentation": "Create PowerPoint decks.",
+    "credit": "Corporate credit committee preparation, challenge, memo, metrics, and Q&A workflows.",
+    "hr": "Hiring playbook workflows: vacancy audit, role profile, screening, interviews, onboarding.",
+    "health_review": "Codebase health checks, evolution stats, and multi-model review.",
+    "admin_control": "Runtime restart, promotion, model switching, and evolution/consciousness controls.",
+    "github": "GitHub issue tracking workflows.",
+}
+
+
+TOOL_PACK_DEPENDENCIES: Dict[str, Set[str]] = {
+    "credit": {"documents"},
+    "hr": {"documents"},
+}
+
+
+TOOL_PACK_ALIASES: Dict[str, str] = {
+    "browser": "web_browser",
+    "web": "web_browser",
+    "git": "code_git",
+    "code": "code_git",
+    "github_issues": "github",
+    "credit_committee": "credit",
+    "hiring": "hr",
+}
+
+
+BASE_TOOL_PACK = "base"
+BASE_TOOL_NAMES = TOOL_PACKS[BASE_TOOL_PACK]
+
+
+def normalize_tool_pack(name: str) -> str:
+    """Return canonical tool pack name, accepting a small alias set."""
+    raw = str(name or "").strip().lower().replace("-", "_")
+    return TOOL_PACK_ALIASES.get(raw, raw)
+
+
+def tool_pack_for_name(tool_name: str) -> str:
+    """Return the configured pack for a tool name, or empty string if unmapped."""
+    for pack, names in TOOL_PACKS.items():
+        if tool_name in names:
+            return pack
+    return ""
 
 
 SELF_MOD_DISABLED_TOOL_NAMES = {
@@ -162,17 +258,24 @@ class ToolRegistry:
                 mod = importlib.import_module(f"ouroboros.tools.{modname}")
                 if hasattr(mod, "get_tools"):
                     for entry in mod.get_tools():
+                        self._assign_pack(entry)
                         self._entries[entry.name] = entry
             except Exception:
                 import logging
                 logging.getLogger(__name__).warning(
                     "Failed to load tool module %s", modname, exc_info=True)
 
+    def _assign_pack(self, entry: ToolEntry) -> None:
+        """Attach configured pack metadata when the tool module did not set it."""
+        if not entry.pack:
+            entry.pack = tool_pack_for_name(entry.name)
+
     def set_context(self, ctx: ToolContext) -> None:
         self._ctx = ctx
 
     def register(self, entry: ToolEntry) -> None:
         """Register a new tool (for extension by Ouroboros)."""
+        self._assign_pack(entry)
         self._entries[entry.name] = entry
 
     # --- Contract ---
@@ -188,6 +291,55 @@ class ToolRegistry:
     def available_tools(self) -> List[str]:
         return [e.name for e in self._entries.values() if self._is_tool_allowed(e.name)]
 
+    def _expand_packs(self, packs: Iterable[str], include_base: bool = True) -> Set[str]:
+        expanded: Set[str] = set()
+        if include_base:
+            expanded.add(BASE_TOOL_PACK)
+        stack = [normalize_tool_pack(p) for p in packs if str(p or "").strip()]
+        while stack:
+            pack = normalize_tool_pack(stack.pop())
+            if pack not in TOOL_PACKS or pack in expanded:
+                continue
+            expanded.add(pack)
+            stack.extend(TOOL_PACK_DEPENDENCIES.get(pack, set()))
+        return expanded
+
+    def list_tool_packs(self) -> List[Dict[str, Any]]:
+        """Return allowed tool packs with descriptions and visible tool counts."""
+        result: List[Dict[str, Any]] = []
+        for pack in TOOL_PACKS:
+            direct_tools = self.get_tools_by_pack(pack, include_dependencies=False)
+            if not direct_tools and pack != BASE_TOOL_PACK:
+                continue
+            result.append({
+                "name": pack,
+                "description": TOOL_PACK_DESCRIPTIONS.get(pack, ""),
+                "tool_count": len(direct_tools),
+                "tools": direct_tools,
+                "dependencies": sorted(TOOL_PACK_DEPENDENCIES.get(pack, set())),
+            })
+        return result
+
+    def get_tools_by_pack(self, pack: str, include_dependencies: bool = False) -> List[str]:
+        """Return allowed tools in a pack, preserving registry load order."""
+        pack = normalize_tool_pack(pack)
+        packs = self._expand_packs([pack], include_base=False) if include_dependencies else {pack}
+        if not packs or any(p not in TOOL_PACKS for p in packs):
+            return []
+        return [
+            e.name for e in self._entries.values()
+            if e.pack in packs and self._is_tool_allowed(e.name)
+        ]
+
+    def schemas_for_packs(self, packs: Iterable[str], include_base: bool = True) -> List[Dict[str, Any]]:
+        """Return schemas for base plus selected packs and their dependencies."""
+        selected = self._expand_packs(packs, include_base=include_base)
+        return [
+            {"type": "function", "function": e.schema}
+            for e in self._entries.values()
+            if e.pack in selected and self._is_tool_allowed(e.name)
+        ]
+
     def schemas(self, core_only: bool = False) -> List[Dict[str, Any]]:
         if not core_only:
             return [
@@ -195,24 +347,18 @@ class ToolRegistry:
                 for e in self._entries.values()
                 if self._is_tool_allowed(e.name)
             ]
-        # Core tools + meta-tools for discovering/enabling extended tools
-        result = []
-        for e in self._entries.values():
-            if not self._is_tool_allowed(e.name):
-                continue
-            if e.name in CORE_TOOL_NAMES or e.name in ("list_available_tools", "enable_tools"):
-                result.append({"type": "function", "function": e.schema})
-        return result
+        # Backward-compatible name: "core" now means the minimal base pack.
+        return self.schemas_for_packs([BASE_TOOL_PACK], include_base=False)
 
     def list_non_core_tools(self) -> List[Dict[str, str]]:
-        """Return name+description of all non-core tools."""
+        """Return name+description+pack of all tools outside the base pack."""
         result = []
         for e in self._entries.values():
             if not self._is_tool_allowed(e.name):
                 continue
-            if e.name not in CORE_TOOL_NAMES:
+            if e.pack != BASE_TOOL_PACK:
                 desc = e.schema.get("description", "No description")
-                result.append({"name": e.name, "description": desc})
+                result.append({"name": e.name, "description": desc, "pack": e.pack})
         return result
 
     def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
@@ -248,7 +394,11 @@ class ToolRegistry:
                 name=entry.name,
                 schema=entry.schema,
                 handler=handler,
+                is_code_tool=entry.is_code_tool,
                 timeout_sec=entry.timeout_sec,
+                pack=entry.pack,
+                tags=entry.tags,
+                risk_level=entry.risk_level,
             )
 
     @property

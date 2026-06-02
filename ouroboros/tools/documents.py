@@ -12,14 +12,15 @@ from pathlib import Path
 from typing import Callable, Dict, List, Tuple
 from xml.etree import ElementTree as ET
 
-import requests
-
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import clip_text, safe_relpath
 
 DEFAULT_MAX_CHARS = 30_000
 DEFAULT_MAX_PAGES = 25
 DEFAULT_MAX_SLIDES = 80
+DEFAULT_MAX_XLSX_SHEETS = 30
+MAX_XLSX_ROWS_PER_SHEET = 200
+MAX_XLSX_CELLS_PER_SHEET = 2_000
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_XML_PART_BYTES = 10 * 1024 * 1024
 MAX_ARCHIVE_FILES = 80
@@ -33,7 +34,7 @@ TEXT_EXTENSIONS = {
 
 ANALYSIS_TYPES = {"summary", "critique", "extract_tasks", "answer_question", "raw"}
 ARCHIVE_EXTENSIONS = {".zip"}
-DOCUMENT_EXTENSIONS = {".pdf", ".pptx", ".docx", ".ppt"} | TEXT_EXTENSIONS | ARCHIVE_EXTENSIONS
+DOCUMENT_EXTENSIONS = {".pdf", ".pptx", ".docx", ".ppt", ".xlsx"} | TEXT_EXTENSIONS | ARCHIVE_EXTENSIONS
 
 @dataclass
 class ExtractedDocument:
@@ -461,6 +462,147 @@ def _extract_docx(path: Path, progress: ProgressFn | None = None) -> ExtractedDo
     )
 
 
+def _xlsx_shared_strings(zf: zipfile.ZipFile) -> List[str]:
+    try:
+        xml_bytes = _read_zip_xml(zf, "xl/sharedStrings.xml")
+    except KeyError:
+        return []
+    root = ET.fromstring(xml_bytes)
+    strings: List[str] = []
+    for item in root:
+        if not item.tag.endswith("}si"):
+            continue
+        parts = [node.text or "" for node in item.iter() if node.tag.endswith("}t")]
+        strings.append("".join(parts))
+    return strings
+
+
+def _xlsx_sheet_targets(zf: zipfile.ZipFile) -> List[Tuple[str, str]]:
+    workbook = ET.fromstring(_read_zip_xml(zf, "xl/workbook.xml"))
+    rels: Dict[str, str] = {}
+    try:
+        rel_root = ET.fromstring(_read_zip_xml(zf, "xl/_rels/workbook.xml.rels"))
+        for rel in rel_root:
+            rel_id = rel.attrib.get("Id", "")
+            target = rel.attrib.get("Target", "")
+            if not rel_id or not target:
+                continue
+            target = target.lstrip("/")
+            if not target.startswith("xl/"):
+                target = "xl/" + target
+            rels[rel_id] = target
+    except KeyError:
+        pass
+
+    sheets: List[Tuple[str, str]] = []
+    for sheet in workbook.iter():
+        if not sheet.tag.endswith("}sheet"):
+            continue
+        name = sheet.attrib.get("name", "Sheet")
+        rel_id = sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id", "")
+        target = rels.get(rel_id)
+        if target:
+            sheets.append((name, target))
+    return sheets
+
+
+def _xlsx_cell_text(cell: ET.Element, shared_strings: List[str]) -> str:
+    cell_type = cell.attrib.get("t", "")
+    formula = ""
+    value = ""
+    for node in cell:
+        if node.tag.endswith("}f") and node.text:
+            formula = node.text.strip()
+        elif node.tag.endswith("}v") and node.text is not None:
+            value = node.text.strip()
+        elif cell_type == "inlineStr" and node.tag.endswith("}is"):
+            value = "".join(t.text or "" for t in node.iter() if t.tag.endswith("}t")).strip()
+
+    if cell_type == "s" and value.isdigit():
+        idx = int(value)
+        value = shared_strings[idx] if 0 <= idx < len(shared_strings) else value
+    elif cell_type == "b":
+        value = "TRUE" if value == "1" else "FALSE" if value == "0" else value
+
+    if formula:
+        if value:
+            return f"={formula} -> {value}"
+        return f"={formula}"
+    return value
+
+
+def _extract_xlsx(path: Path, max_sheets: int = DEFAULT_MAX_XLSX_SHEETS, progress: ProgressFn | None = None) -> ExtractedDocument:
+    warnings: List[str] = []
+    sections: List[Tuple[str, str]] = []
+    with zipfile.ZipFile(path) as zf:
+        shared_strings = _xlsx_shared_strings(zf)
+        sheets = _xlsx_sheet_targets(zf)
+        if not sheets:
+            return ExtractedDocument(
+                kind="xlsx",
+                metadata={"extractor": "zip+xml"},
+                warnings=["Workbook did not expose any worksheets."],
+            )
+
+        sheets_to_extract = min(len(sheets), max_sheets)
+        _emit_progress(
+            progress,
+            f"Открыл XLSX `{path.name}`: {len(sheets)} листов. Извлекаю видимые значения и формулы из {sheets_to_extract} листов.",
+        )
+
+        for idx, (sheet_name, target) in enumerate(sheets[:max_sheets], start=1):
+            if idx == 1 or idx == sheets_to_extract or idx % 10 == 0:
+                _emit_progress(progress, f"Читаю XLSX `{path.name}`: лист {idx}/{sheets_to_extract}.")
+            try:
+                root = ET.fromstring(_read_zip_xml(zf, target))
+            except Exception as exc:
+                warnings.append(f"{sheet_name}: could not read worksheet: {type(exc).__name__}: {exc}")
+                continue
+
+            lines: List[str] = []
+            cells_seen = 0
+            rows_seen = 0
+            truncated = False
+            for row in root.iter():
+                if not row.tag.endswith("}row"):
+                    continue
+                rows_seen += 1
+                if rows_seen > MAX_XLSX_ROWS_PER_SHEET:
+                    truncated = True
+                    break
+                row_values: List[str] = []
+                for cell in row:
+                    if not cell.tag.endswith("}c"):
+                        continue
+                    cells_seen += 1
+                    if cells_seen > MAX_XLSX_CELLS_PER_SHEET:
+                        truncated = True
+                        break
+                    ref = cell.attrib.get("r", "")
+                    text = _xlsx_cell_text(cell, shared_strings)
+                    if text:
+                        row_values.append(f"{ref}={text}" if ref else text)
+                if row_values:
+                    lines.append(" | ".join(row_values))
+                if truncated:
+                    break
+            if truncated:
+                warnings.append(
+                    f"{sheet_name}: only first {MAX_XLSX_ROWS_PER_SHEET} rows / {MAX_XLSX_CELLS_PER_SHEET} cells were extracted."
+                )
+            sections.append((f"Sheet {idx}: {sheet_name}", "\n".join(lines) or "[No visible cell values]"))
+
+    if len(sheets) > max_sheets:
+        warnings.append(f"Only the first {max_sheets} of {len(sheets)} sheets were extracted.")
+
+    return ExtractedDocument(
+        kind="xlsx",
+        metadata={"sheets": str(len(sheets)), "extractor": "zip+xml"},
+        sections=sections,
+        warnings=warnings,
+    )
+
+
 def _extract_zip(
     path: Path,
     max_pages: int,
@@ -594,6 +736,8 @@ def _extract_document(
         return _extract_pptx(path, max_slides, progress=progress)
     if suffix == ".docx":
         return _extract_docx(path, progress=progress)
+    if suffix == ".xlsx":
+        return _extract_xlsx(path, max_sheets=min(max_slides, DEFAULT_MAX_XLSX_SHEETS), progress=progress)
     if suffix == ".zip" and allow_archives:
         return _extract_zip(
             path,
@@ -614,7 +758,7 @@ def _extract_document(
     return ExtractedDocument(
         kind=suffix.lstrip(".") or "unknown",
         warnings=[
-            "Unsupported document type. Supported: PDF, ZIP, PPTX, DOCX, TXT, MD, CSV, JSON, HTML, XML, code files.",
+            "Unsupported document type. Supported: PDF, ZIP, PPTX, DOCX, XLSX, TXT, MD, CSV, JSON, HTML, XML, code files.",
         ],
     )
 
@@ -735,6 +879,8 @@ def _download_url_to_drive(
     output_path: str = "",
     max_bytes: int = MAX_FILE_BYTES,
 ) -> str:
+    import requests
+
     _emit_progress(ctx.emit_progress_fn, "Скачиваю файл по ссылке в рабочую папку. Если сервер отдаёт загрузку вместо страницы, я заберу сам файл.")
     parsed = _validate_download_url(url)
     max_bytes = _clean_limit(max_bytes, MAX_FILE_BYTES, 1_000, MAX_FILE_BYTES)

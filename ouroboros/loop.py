@@ -18,7 +18,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import logging
 
-from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
+from ouroboros.llm import LLMClient, default_fallback_models, normalize_reasoning_effort, add_usage
+from ouroboros.tool_routing import setup_initial_tool_schemas
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history, compact_tool_history_llm
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens
@@ -496,66 +497,6 @@ def _maybe_inject_self_check(
     emit_progress(f"🔄 Checkpoint {checkpoint_num} at round {round_idx}: ~{ctx_tokens} tokens, ${task_cost:.2f} spent")
 
 
-def _setup_dynamic_tools(tools_registry, tool_schemas, messages):
-    """
-    Wire tool-discovery handlers onto an existing tool_schemas list.
-
-    Creates closures for list_available_tools / enable_tools, registers them
-    as handler overrides, and injects a system message advertising non-core
-    tools.  Mutates tool_schemas in-place (via list.append) when tools are
-    enabled, so the caller's reference stays live.
-
-    Returns (tool_schemas, enabled_extra_set).
-    """
-    enabled_extra: set = set()
-
-    def _handle_list_tools(ctx=None, **kwargs):
-        non_core = tools_registry.list_non_core_tools()
-        if not non_core:
-            return "All tools are already in your active set."
-        lines = [f"**{len(non_core)} additional tools available** (use `enable_tools` to activate):\n"]
-        for t in non_core:
-            lines.append(f"- **{t['name']}**: {t['description'][:120]}")
-        return "\n".join(lines)
-
-    def _handle_enable_tools(ctx=None, tools: str = "", **kwargs):
-        names = [n.strip() for n in tools.split(",") if n.strip()]
-        enabled, not_found = [], []
-        for name in names:
-            schema = tools_registry.get_schema_by_name(name)
-            if schema and name not in enabled_extra:
-                tool_schemas.append(schema)
-                enabled_extra.add(name)
-                enabled.append(name)
-            elif name in enabled_extra:
-                enabled.append(f"{name} (already active)")
-            else:
-                not_found.append(name)
-        parts = []
-        if enabled:
-            parts.append(f"✅ Enabled: {', '.join(enabled)}")
-        if not_found:
-            parts.append(f"❌ Not found: {', '.join(not_found)}")
-        return "\n".join(parts) if parts else "No tools specified."
-
-    tools_registry.override_handler("list_available_tools", _handle_list_tools)
-    tools_registry.override_handler("enable_tools", _handle_enable_tools)
-
-    non_core_count = len(tools_registry.list_non_core_tools())
-    if non_core_count > 0:
-        messages.append({
-            "role": "system",
-            "content": (
-                f"Note: You have {len(tool_schemas)} core tools loaded. "
-                f"There are {non_core_count} additional tools available "
-                f"(use `list_available_tools` to see them, `enable_tools` to activate). "
-                f"Core tools cover most tasks. Enable extras only when needed."
-            ),
-        })
-
-    return tool_schemas, enabled_extra
-
-
 def _drain_incoming_messages(
     messages: List[Dict[str, Any]],
     incoming_messages: queue.Queue,
@@ -597,6 +538,60 @@ def _drain_incoming_messages(
                     pass
 
 
+def _read_max_rounds() -> int:
+    try:
+        return max(1, int(os.environ.get("OUROBOROS_MAX_ROUNDS", "200")))
+    except (ValueError, TypeError):
+        log.warning("Invalid OUROBOROS_MAX_ROUNDS, defaulting to 200")
+        return 200
+
+
+def _retry_empty_response_with_fallback(
+    llm: LLMClient,
+    messages: List[Dict[str, Any]],
+    active_model: str,
+    tool_schemas: List[Dict[str, Any]],
+    active_effort: str,
+    max_retries: int,
+    drive_logs: pathlib.Path,
+    task_id: str,
+    round_idx: int,
+    event_queue: Optional[queue.Queue],
+    accumulated_usage: Dict[str, Any],
+    task_type: str,
+    user_id: Optional[int],
+    user_role: str,
+    emit_progress: Callable[[str], None],
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    fallback_list_raw = os.environ.get(
+        "OUROBOROS_MODEL_FALLBACK_LIST",
+        default_fallback_models(llm.provider),
+    )
+    fallback_candidates = [m.strip() for m in fallback_list_raw.split(",") if m.strip()]
+    fallback_model = next(
+        (candidate for candidate in fallback_candidates if candidate != active_model and llm.supports_model(candidate)),
+        None,
+    )
+    if fallback_model is None:
+        return None, (
+            f"⚠️ Failed to get a response from model {active_model} after {max_retries} attempts. "
+            "All fallback models match the active one. Try rephrasing your request."
+        )
+
+    emit_progress(f"⚡ Fallback: {active_model} → {fallback_model} after empty response")
+    msg, _fallback_cost = _call_llm_with_retry(
+        llm, messages, fallback_model, tool_schemas, active_effort,
+        max_retries, drive_logs, task_id, round_idx, event_queue,
+        accumulated_usage, task_type, user_id=user_id, user_role=user_role
+    )
+    if msg is None:
+        return None, (
+            f"⚠️ Failed to get a response from the model after {max_retries} attempts. "
+            f"Fallback model ({fallback_model}) also returned no response."
+        )
+    return msg, ""
+
+
 def run_llm_loop(
     messages: List[Dict[str, Any]],
     tools: ToolRegistry,
@@ -636,9 +631,11 @@ def run_llm_loop(
     from ouroboros.tools import tool_discovery as _td
     _td.set_registry(tools)
 
-    # Selective tool schemas: core set + meta-tools for discovery.
-    tool_schemas = tools.schemas(core_only=True)
-    tool_schemas, _enabled_extra_tools = _setup_dynamic_tools(tools, tool_schemas, messages)
+    tool_schemas = setup_initial_tool_schemas(
+        messages, tools, llm, drive_logs, task_id, task_type, user_role,
+        event_queue, accumulated_usage, llm_trace, user_id,
+        _estimate_cost, _emit_llm_usage_event
+    )
 
     # Set budget tracking on tool context for real-time usage events
     tools._ctx.event_queue = event_queue
@@ -647,11 +644,7 @@ def run_llm_loop(
     stateful_executor = _StatefulToolExecutor()
     # Dedup set for per-task owner messages from Drive mailbox
     _owner_msg_seen: set = set()
-    try:
-        MAX_ROUNDS = max(1, int(os.environ.get("OUROBOROS_MAX_ROUNDS", "200")))
-    except (ValueError, TypeError):
-        MAX_ROUNDS = 200
-        log.warning("Invalid OUROBOROS_MAX_ROUNDS, defaulting to 200")
+    MAX_ROUNDS = _read_max_rounds()
     round_idx = 0
     try:
         while True:
@@ -711,44 +704,13 @@ def run_llm_loop(
 
             # Fallback to another model if primary model returns empty responses
             if msg is None:
-                # Configurable fallback priority list (Bible P3: no hardcoded behavior)
-                from ouroboros.llm import default_fallback_models
-                fallback_list_raw = os.environ.get(
-                    "OUROBOROS_MODEL_FALLBACK_LIST",
-                    default_fallback_models(llm.provider)
-                )
-                fallback_candidates = [m.strip() for m in fallback_list_raw.split(",") if m.strip()]
-                fallback_model = None
-                for candidate in fallback_candidates:
-                    if candidate != active_model and llm.supports_model(candidate):
-                        fallback_model = candidate
-                        break
-                if fallback_model is None:
-                    return (
-                        f"⚠️ Failed to get a response from model {active_model} after {max_retries} attempts. "
-                        f"All fallback models match the active one. Try rephrasing your request."
-                    ), accumulated_usage, llm_trace
-
-                # Emit progress message so user sees fallback happening
-                fallback_progress = f"⚡ Fallback: {active_model} → {fallback_model} after empty response"
-                emit_progress(fallback_progress)
-
-                # Try fallback model (don't increment round_idx — this is still same logical round)
-                msg, fallback_cost = _call_llm_with_retry(
-                    llm, messages, fallback_model, tool_schemas, active_effort,
+                msg, fallback_error = _retry_empty_response_with_fallback(
+                    llm, messages, active_model, tool_schemas, active_effort,
                     max_retries, drive_logs, task_id, round_idx, event_queue,
-                    accumulated_usage, task_type, user_id=user_id, user_role=user_role
+                    accumulated_usage, task_type, user_id, user_role, emit_progress
                 )
-
-                # If fallback also fails, give up
                 if msg is None:
-                    return (
-                        f"⚠️ Failed to get a response from the model after {max_retries} attempts. "
-                        f"Fallback model ({fallback_model}) also returned no response."
-                    ), accumulated_usage, llm_trace
-
-                # Fallback succeeded — continue processing with this msg
-                # (don't return — fall through to tool_calls processing below)
+                    return fallback_error, accumulated_usage, llm_trace
 
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")

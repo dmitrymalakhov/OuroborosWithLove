@@ -27,6 +27,11 @@ def _event_drive_root(evt: Dict[str, Any], ctx: Any) -> pathlib.Path:
     return pathlib.Path(str(raw)).resolve() if raw else pathlib.Path(ctx.DRIVE_ROOT)
 
 
+def _event_shared_drive_root(evt: Dict[str, Any], ctx: Any) -> pathlib.Path:
+    raw = evt.get("shared_drive_root")
+    return pathlib.Path(str(raw)).resolve() if raw else pathlib.Path(ctx.DRIVE_ROOT)
+
+
 def _event_user_id(evt: Dict[str, Any]) -> Optional[int]:
     raw = evt.get("user_id")
     if raw is None or str(raw).strip() == "":
@@ -528,6 +533,128 @@ def _handle_send_document(evt: Dict[str, Any], ctx: Any) -> None:
         )
 
 
+def _handle_send_poll(evt: Dict[str, Any], ctx: Any) -> None:
+    """Send a native Telegram poll and register it for answer collection."""
+    try:
+        from supervisor.polls import record_poll_failed, record_poll_sent
+
+        chat_id = int(evt.get("chat_id") or 0)
+        question = str(evt.get("question") or "").strip()
+        options_raw = evt.get("options") if isinstance(evt.get("options"), list) else []
+        options = [str(opt).strip() for opt in options_raw if str(opt).strip()]
+        poll_uid = str(evt.get("poll_uid") or "").strip()
+        team_root = _event_drive_root(evt, ctx)
+        shared_root = _event_shared_drive_root(evt, ctx)
+
+        if not chat_id or not question or len(options) < 2:
+            return
+
+        settings = {
+            "is_anonymous": bool(evt.get("is_anonymous")),
+            "allows_multiple_answers": bool(evt.get("allows_multiple_answers")),
+            "open_period_seconds": int(evt.get("open_period_seconds") or 0),
+        }
+        ok, err, message = ctx.TG.send_poll(
+            chat_id,
+            question,
+            options,
+            is_anonymous=settings["is_anonymous"],
+            allows_multiple_answers=settings["allows_multiple_answers"],
+            open_period_seconds=settings["open_period_seconds"],
+        )
+        if not ok:
+            record_poll_failed(
+                shared_root,
+                team_root,
+                poll_uid=poll_uid,
+                chat_id=chat_id,
+                question=question,
+                options=options,
+                error=err,
+                created_by=_event_user_id(evt),
+                task_id=str(evt.get("task_id") or ""),
+            )
+            ctx.append_jsonl(
+                team_root / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "send_poll_error",
+                    "chat_id": chat_id,
+                    "poll_uid": poll_uid,
+                    "error": err,
+                },
+            )
+            return
+
+        record_poll_sent(
+            shared_root,
+            team_root,
+            poll_uid=poll_uid,
+            chat_id=chat_id,
+            message_id=int(message.get("message_id") or 0),
+            poll=message.get("poll") if isinstance(message.get("poll"), dict) else {},
+            question=question,
+            options=options,
+            created_by=_event_user_id(evt),
+            task_id=str(evt.get("task_id") or ""),
+            settings=settings,
+        )
+    except Exception as e:
+        ctx.append_jsonl(
+            _event_drive_root(evt, ctx) / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "send_poll_event_error", "error": repr(e),
+            },
+        )
+
+
+def _handle_stop_poll(evt: Dict[str, Any], ctx: Any) -> None:
+    """Stop a Telegram poll and persist final counts."""
+    try:
+        from supervisor.polls import POLL_CLOSED, find_poll_record, record_poll_update
+
+        chat_id = int(evt.get("chat_id") or 0)
+        shared_root = _event_shared_drive_root(evt, ctx)
+        poll_ref = str(evt.get("poll_ref") or "").strip()
+        rec = find_poll_record(shared_root, poll_ref=poll_ref, chat_id=chat_id or None)
+        if not rec:
+            if chat_id:
+                ctx.send_with_budget(
+                    chat_id,
+                    f"⚠️ Poll not found: {poll_ref}",
+                    log_drive_root=_event_drive_root(evt, ctx),
+                    log_user_id=_event_user_id(evt),
+                )
+            return
+        message_id = int(rec.get("message_id") or 0)
+        target_chat_id = int(rec.get("chat_id") or chat_id or 0)
+        if not target_chat_id or not message_id:
+            return
+        ok, err, poll = ctx.TG.stop_poll(target_chat_id, message_id)
+        if not ok:
+            ctx.append_jsonl(
+                _event_drive_root(evt, ctx) / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "stop_poll_error",
+                    "chat_id": target_chat_id,
+                    "poll_ref": poll_ref,
+                    "error": err,
+                },
+            )
+            return
+        record_poll_update(shared_root, poll, status=POLL_CLOSED)
+    except Exception as e:
+        ctx.append_jsonl(
+            _event_drive_root(evt, ctx) / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "stop_poll_event_error", "error": repr(e),
+            },
+        )
+
+
 def _handle_owner_message_injected(evt: Dict[str, Any], ctx: Any) -> None:
     """Log owner_message_injected to events.jsonl for health invariant #5 (duplicate processing)."""
     from ouroboros.utils import utc_now_iso
@@ -559,6 +686,8 @@ EVENT_HANDLERS = {
     "cancel_task": _handle_cancel_task,
     "send_photo": _handle_send_photo,
     "send_document": _handle_send_document,
+    "send_poll": _handle_send_poll,
+    "stop_poll": _handle_stop_poll,
     "toggle_evolution": _handle_toggle_evolution,
     "toggle_consciousness": _handle_toggle_consciousness,
     "owner_message_injected": _handle_owner_message_injected,

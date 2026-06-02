@@ -127,7 +127,7 @@ def _update_chat_metadata(
 
 
 def _ensure_team_workspace_files(root: pathlib.Path) -> None:
-    for sub in ("memory", "logs", "task_results", "uploads", "inbox", "locks", "archive", "index"):
+    for sub in ("memory", "logs", "task_results", "uploads", "inbox", "polls", "locks", "archive", "index"):
         (root / sub).mkdir(parents=True, exist_ok=True)
     for rel in ("logs/chat.jsonl", "inbox/messages.jsonl"):
         p = root / rel

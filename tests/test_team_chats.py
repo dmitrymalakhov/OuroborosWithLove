@@ -1,3 +1,4 @@
+import json
 import pathlib
 import tempfile
 
@@ -292,11 +293,168 @@ def test_team_context_does_not_include_personal_memory():
         assert "private user identity" not in system_text
 
 
+def test_team_poll_tool_queues_create_event_and_requires_team():
+    from ouroboros.tools.polls import _team_poll_create
+    from ouroboros.tools.registry import ToolContext
+
+    with tempfile.TemporaryDirectory() as tmp:
+        drive_root = pathlib.Path(tmp)
+        ctx = ToolContext(repo_dir=drive_root, drive_root=drive_root)
+        assert "only inside" in _team_poll_create(ctx, "Pick?", ["A", "B"])
+
+        team_root = drive_root / "teams" / "tg_100123"
+        ctx = ToolContext(
+            repo_dir=drive_root,
+            drive_root=team_root,
+            shared_drive_root=drive_root,
+            current_chat_id=-100123,
+            current_user_id=42,
+            team_chat_id=-100123,
+            team_slug="tg_100123",
+            is_team_workspace=True,
+            task_id="task1",
+        )
+
+        result = _team_poll_create(
+            ctx,
+            "Pick one?",
+            ["Alpha", "Beta"],
+            allows_multiple_answers=True,
+            is_anonymous=False,
+        )
+
+        assert result.startswith("OK:")
+        event = ctx.pending_events[0]
+        assert event["type"] == "send_poll"
+        assert event["chat_id"] == -100123
+        assert event["question"] == "Pick one?"
+        assert event["options"] == ["Alpha", "Beta"]
+        assert event["allows_multiple_answers"] is True
+        assert event["is_anonymous"] is False
+        assert event["drive_root"] == str(team_root)
+        assert event["shared_drive_root"] == str(drive_root)
+
+
+def test_team_poll_event_answer_results_and_close_roundtrip():
+    from types import SimpleNamespace
+
+    from ouroboros.tools.polls import _team_poll_close, _team_poll_results
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.utils import append_jsonl
+    from supervisor.events import _handle_send_poll, _handle_stop_poll
+    from supervisor.polls import record_poll_answer
+
+    class FakeTG:
+        def __init__(self):
+            self.sent_polls = []
+            self.stopped = []
+
+        def send_poll(
+            self,
+            chat_id,
+            question,
+            options,
+            is_anonymous=False,
+            allows_multiple_answers=False,
+            open_period_seconds=0,
+        ):
+            self.sent_polls.append((chat_id, question, options, is_anonymous, allows_multiple_answers, open_period_seconds))
+            return True, "ok", {
+                "message_id": 77,
+                "poll": {
+                    "id": "poll123",
+                    "question": question,
+                    "options": [{"text": options[0], "voter_count": 0}, {"text": options[1], "voter_count": 0}],
+                    "total_voter_count": 0,
+                    "is_closed": False,
+                    "is_anonymous": is_anonymous,
+                    "allows_multiple_answers": allows_multiple_answers,
+                },
+            }
+
+        def stop_poll(self, chat_id, message_id):
+            self.stopped.append((chat_id, message_id))
+            return True, "ok", {
+                "id": "poll123",
+                "question": "Pick one?",
+                "options": [{"text": "Alpha", "voter_count": 0}, {"text": "Beta", "voter_count": 1}],
+                "total_voter_count": 1,
+                "is_closed": True,
+                "is_anonymous": False,
+            }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        drive_root = pathlib.Path(tmp)
+        team_root = drive_root / "teams" / "tg_100123"
+        (team_root / "logs").mkdir(parents=True)
+        sent = []
+        tg = FakeTG()
+        event_ctx = SimpleNamespace(
+            DRIVE_ROOT=drive_root,
+            TG=tg,
+            append_jsonl=append_jsonl,
+            send_with_budget=lambda *args, **kwargs: sent.append((args, kwargs)),
+        )
+
+        _handle_send_poll({
+            "type": "send_poll",
+            "poll_uid": "polluid1",
+            "chat_id": -100123,
+            "question": "Pick one?",
+            "options": ["Alpha", "Beta"],
+            "is_anonymous": False,
+            "allows_multiple_answers": False,
+            "open_period_seconds": 0,
+            "drive_root": str(team_root),
+            "shared_drive_root": str(drive_root),
+            "user_id": 42,
+            "task_id": "task1",
+        }, event_ctx)
+
+        snapshot = json.loads((team_root / "polls" / "polluid1.json").read_text(encoding="utf-8"))
+        assert snapshot["telegram_poll_id"] == "poll123"
+        assert snapshot["message_id"] == 77
+        assert tg.sent_polls == [(-100123, "Pick one?", ["Alpha", "Beta"], False, False, 0)]
+
+        record_poll_answer(drive_root, {
+            "poll_id": "poll123",
+            "user": {"id": 42, "username": "alice", "first_name": "Alice"},
+            "option_ids": [1],
+        })
+
+        tool_ctx = ToolContext(
+            repo_dir=drive_root,
+            drive_root=team_root,
+            shared_drive_root=drive_root,
+            current_chat_id=-100123,
+            current_user_id=42,
+            team_chat_id=-100123,
+            team_slug="tg_100123",
+            is_team_workspace=True,
+        )
+        results = _team_poll_results(tool_ctx, poll_ref="poll123", include_voters=True)
+        assert "Beta — 1" in results
+        assert "@alice" in results
+        assert "Alice" in results
+
+        close_result = _team_poll_close(tool_ctx, "polluid1")
+        assert close_result.startswith("OK:")
+        stop_event = tool_ctx.pending_events[-1]
+        assert stop_event["type"] == "stop_poll"
+        _handle_stop_poll(stop_event, event_ctx)
+
+        closed = json.loads((team_root / "polls" / "polluid1.json").read_text(encoding="utf-8"))
+        assert closed["status"] == "closed"
+        assert closed["is_closed"] is True
+        assert tg.stopped == [(-100123, 77)]
+
+
 def test_telegram_inline_keyboard_methods(monkeypatch):
     from supervisor import telegram
     from supervisor.telegram import TelegramClient
 
     calls = []
+    get_calls = []
 
     class Response:
         def __init__(self, payload):
@@ -311,14 +469,54 @@ def test_telegram_inline_keyboard_methods(monkeypatch):
 
     class FakeRequests:
         @staticmethod
+        def get(url, params=None, timeout=0):
+            get_calls.append((url, params))
+            return Response({"ok": True, "result": []})
+
+        @staticmethod
         def post(url, data=None, timeout=0, files=None):
             calls.append((url, data))
             if url.endswith("/sendMessage"):
                 return Response({"ok": True, "result": {"message_id": 123}})
+            if url.endswith("/sendPoll"):
+                return Response({
+                    "ok": True,
+                    "result": {
+                        "message_id": 456,
+                        "poll": {
+                            "id": "poll123",
+                            "question": data["question"],
+                            "options": [
+                                {"text": "A", "voter_count": 0},
+                                {"text": "B", "voter_count": 0},
+                            ],
+                            "total_voter_count": 0,
+                            "is_closed": False,
+                            "is_anonymous": data["is_anonymous"],
+                            "allows_multiple_answers": data["allows_multiple_answers"],
+                        },
+                    },
+                })
+            if url.endswith("/stopPoll"):
+                return Response({
+                    "ok": True,
+                    "result": {
+                        "id": "poll123",
+                        "question": "Pick",
+                        "options": [{"text": "A", "voter_count": 1}, {"text": "B", "voter_count": 0}],
+                        "total_voter_count": 1,
+                        "is_closed": True,
+                    },
+                })
             return Response({"ok": True, "result": True})
 
     monkeypatch.setattr(telegram, "requests", FakeRequests)
     client = TelegramClient("token")
+
+    assert client.get_updates(10) == []
+    allowed = json.loads(get_calls[0][1]["allowed_updates"])
+    assert "poll" in allowed
+    assert "poll_answer" in allowed
 
     ok, err, message_id = client.send_message_with_markup(
         1,
@@ -337,6 +535,19 @@ def test_telegram_inline_keyboard_methods(monkeypatch):
     ok, err = client.edit_message_text(1, 123, "done")
     assert ok is True
     assert err == "ok"
+
+    ok, err, message = client.send_poll(1, "Pick", ["A", "B"], is_anonymous=False)
+    assert ok is True
+    assert err == "ok"
+    assert message["poll"]["id"] == "poll123"
+    poll_call = next(call for call in calls if call[0].endswith("/sendPoll"))
+    assert json.loads(poll_call[1]["options"]) == [{"text": "A"}, {"text": "B"}]
+    assert poll_call[1]["is_anonymous"] is False
+
+    ok, err, poll = client.stop_poll(1, 456)
+    assert ok is True
+    assert err == "ok"
+    assert poll["is_closed"] is True
 
 
 def test_telegram_error_redacts_bot_token():

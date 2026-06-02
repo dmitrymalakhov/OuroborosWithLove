@@ -135,10 +135,10 @@ CFG = {
     "GITHUB_REPO": "ouroboros",                                  # <-- repo name (after fork)
     # Models
     "OUROBOROS_LLM_PROVIDER": "openrouter",                      # openrouter or openai
-    # For direct OpenAI, set provider to "openai" and use native model IDs like "gpt-5.2".
+    # For direct OpenAI, set provider to "openai" and use native model IDs like "gpt-5.2" or "gpt-5.4-mini".
     "OUROBOROS_MODEL": "anthropic/claude-sonnet-4.6",            # primary LLM (via OpenRouter)
     "OUROBOROS_MODEL_CODE": "anthropic/claude-sonnet-4.6",       # code editing (Claude Code CLI)
-    "OUROBOROS_MODEL_LIGHT": "google/gemini-3-pro-preview",      # consciousness + lightweight tasks
+    "OUROBOROS_MODEL_LIGHT": "gpt-5.4-mini",                     # consciousness + lightweight tasks
     "OUROBOROS_WEBSEARCH_MODEL": "gpt-5",                        # web search (OpenAI Responses API)
     # Fallback chain (first model != active will be used on empty response)
     "OUROBOROS_MODEL_FALLBACK_LIST": "anthropic/claude-sonnet-4.6,google/gemini-3-pro-preview,openai/gpt-4.1",
@@ -206,21 +206,23 @@ All other messages are sent directly to the LLM (Principle 3: LLM-First).
 
 ## Tool Capabilities
 
-Ouroboros exposes its abilities through an auto-discovered tool registry. The LLM sees a compact core toolset first and can enable additional tools when a task needs them.
+Ouroboros exposes its abilities through an auto-discovered tool registry. Tools are grouped into thematic packs. A lightweight router (`OUROBOROS_MODEL_LIGHT`) selects 0-3 packs for the request before the main LLM loop starts; the LLM can still inspect and enable other packs during the task.
 
 | Area | Tools / runtime path | What they enable |
 |------|----------------------|------------------|
 | Files and workspace | `drive_read`, `drive_list`, `drive_write`, `send_file`, `repo_read`, `repo_list` | Read and write user workspace files, send generated CSV/TSV/Markdown/report files back to Telegram, and inspect the repository when allowed. |
-| Document analysis | `analyze_document`, `extract_archive` | Extract PDF, ZIP, PPTX, DOCX, TXT, Markdown, CSV, JSON, HTML, XML, and code-like files for summaries, critique, Q&A, action item extraction, safe archive unpacking, and targeted PDF page ranges such as `15-21,48-55`. |
+| Document analysis | `analyze_document`, `extract_archive` | Extract PDF, ZIP, PPTX, DOCX, XLSX, TXT, Markdown, CSV, JSON, HTML, XML, and code-like files for summaries, critique, Q&A, action item extraction, safe archive unpacking, and targeted PDF page ranges such as `15-21,48-55`. |
 | Presentation generation | `create_presentation` | Generate PowerPoint `.pptx` decks from LLM-designed slide outlines, save them in the user's workspace, and queue the finished file for Telegram delivery. |
+| HR hiring | `hr_vacancy_audit`, `hr_role_profile`, `hr_candidate_screen`, `hr_interview_kit`, `hr_onboarding_checklist` | Use a curated hiring playbook to audit vacancies, build role scorecards, screen candidates against evidence, prepare interviews, and create onboarding/probation checklists. |
+| Credit committee | `credit_pack_check`, `credit_metrics_check`, `credit_deck_challenge`, `credit_speaker_qna`, `credit_committee_readiness`, `credit_memo_draft`, `credit_deck_outline` | Prepare corporate credit committee materials, challenge speaker decks, verify key metrics where evidence exists, generate Q&A, score readiness, draft memo/deck outlines, and flag escalation items. |
 | Telegram uploads | runtime upload pipeline + `analyze_document` + OpenAI Whisper | Telegram document attachments are stored in `uploads/YYYY-MM-DD/` inside the sender's workspace, then passed to the agent as a readable path. Voice/audio uploads are transcribed before the agent sees them. ZIP uploads can be analyzed directly or unpacked first, with visible progress updates for long parsing steps. |
 | File downloads | `download_url_to_drive` | Download public PDF/ZIP/PPTX/DOCX links into the user's workspace when browser automation only sees a file download prompt. |
 | Web and browser | `web_search`, `browse_page`, `browser_action` | Search the web, open pages, extract text/HTML/Markdown, click/fill/select, scroll, evaluate JavaScript, and take screenshots. |
 | Vision | `analyze_screenshot`, `vlm_query`, `send_photo` | Analyze screenshots or provided images and send generated/collected images back to Telegram. |
 | Memory and knowledge | `chat_history`, `update_scratchpad`, `update_identity`, `knowledge_read`, `knowledge_write`, `knowledge_list`, `summarize_dialogue` | Maintain persistent memory, structured knowledge topics, and dialogue summaries. |
 | Task orchestration | `schedule_task`, `wait_for_task`, `get_task_result`, `cancel_task`, `forward_to_worker` | Decompose complex work into background tasks and route follow-up messages to the right worker. |
-| Team workspaces | `team_inbox_send`, `team_inbox_read`, `team_chat_history`, `team_chat_search`, `team_members` | Coordinate agents and inspect approved Telegram group context without exposing private user memory. |
-| Context management | `compact_context`, `list_available_tools`, `enable_tools` | Keep long conversations manageable and dynamically expose non-core tools only when needed. |
+| Team workspaces | `team_inbox_send`, `team_inbox_read`, `team_chat_history`, `team_chat_search`, `team_members`, `team_poll_create`, `team_poll_results`, `team_poll_close` | Coordinate agents, inspect approved Telegram group context, run native Telegram polls, and collect poll answers without exposing private user memory. |
+| Tool routing and context | `list_tool_packs`, `enable_tool_pack`, `compact_context`, `list_available_tools`, `enable_tools` | Keep the initial tool surface small, inspect thematic packs, dynamically enable more capabilities, and compact long conversations. |
 | Health and review | `codebase_health`, `multi_model_review`, `request_review` | Inspect code health and ask other models to review important changes. |
 | Git and self-modification | `repo_write_commit`, `repo_commit_push`, `git_status`, `git_diff`, `request_restart`, `promote_to_stable`, `toggle_evolution`, `generate_evolution_stats` | Let Ouroboros modify itself, commit, push, restart, promote stable branches, and generate evolution metrics when self-modification is enabled. |
 | Shell and code editing | `run_shell`, `claude_code_edit` | Run controlled shell commands and optionally delegate code edits to Claude Code CLI. |
@@ -258,6 +260,7 @@ When the bot is added to a Telegram group or supergroup, Ouroboros creates a pen
 - Pending and denied groups do not run LLM tasks or accumulate group history.
 - In approved groups, the bot answers only when mentioned, replied to, or addressed by slash command.
 - In approved groups, agents can read recent group messages with `team_chat_history` and search them with `team_chat_search`.
+- In approved groups, agents can create native Telegram polls with `team_poll_create`, read collected results with `team_poll_results`, and close bot-created polls with `team_poll_close`. Non-anonymous polls collect voter identities; anonymous polls collect only aggregate counts.
 - Group tasks use only the group workspace; personal user memory, scratchpads, identities, and private chat history are not injected.
 
 The team chat registry is stored at `state/team_chats.json`.
@@ -268,7 +271,7 @@ The team chat registry is stored at `state/team_chats.json`.
 
 Set `OUROBOROS_LLM_PROVIDER=openrouter` to use OpenRouter model IDs such as `anthropic/claude-sonnet-4.6`, `google/gemini-3-pro-preview`, or `openai/gpt-4.1`.
 
-Set `OUROBOROS_LLM_PROVIDER=openai` to call the OpenAI API directly with native model IDs such as `gpt-5.2`, `gpt-5.2-codex`, or `gpt-4.1`. In direct OpenAI mode, `OPENAI_API_KEY` is required and `claude_code_edit` is disabled by default.
+Set `OUROBOROS_LLM_PROVIDER=openai` to call the OpenAI API directly with native model IDs such as `gpt-5.2`, `gpt-5.2-codex`, or `gpt-5.4-mini`. In direct OpenAI mode, `OPENAI_API_KEY` is required and `claude_code_edit` is disabled by default.
 
 ---
 
@@ -323,7 +326,10 @@ Full text: [BIBLE.md](BIBLE.md)
 | `OUROBOROS_LLM_PROVIDER` | `openrouter` | Main-agent API provider: `openrouter` or direct `openai` |
 | `OUROBOROS_MODEL` | `anthropic/claude-sonnet-4.6` via OpenRouter; `gpt-5.2` via OpenAI | Primary LLM model |
 | `OUROBOROS_MODEL_CODE` | `anthropic/claude-sonnet-4.6` via OpenRouter; `gpt-5.2-codex` via OpenAI | Model available for code-heavy tasks |
-| `OUROBOROS_MODEL_LIGHT` | `google/gemini-3-pro-preview` via OpenRouter; `gpt-4.1` via OpenAI | Model for lightweight tasks (dedup, compaction) |
+| `OUROBOROS_MODEL_LIGHT` | `google/gemini-3-pro-preview` via OpenRouter; `gpt-5.4-mini` via OpenAI | Model for lightweight tasks (tool-pack routing, dedup, compaction) |
+| `OUROBOROS_TOOL_ROUTER_DISABLE` | `0` | Disable lightweight tool-pack routing and start with only the base pack |
+| `OUROBOROS_TOOL_ROUTER_CONFIDENCE` | `0.55` | Minimum router confidence required to preload selected packs |
+| `OUROBOROS_TOOL_ROUTER_MAX_PACKS` | `3` | Maximum non-base packs the router may preload |
 | `OUROBOROS_WEBSEARCH_MODEL` | `gpt-5` | Model for web search (OpenAI Responses API) |
 | `OUROBOROS_TRANSCRIBE_AUDIO` | `1` | Enable Telegram voice/audio transcription through OpenAI Audio Transcriptions |
 | `OUROBOROS_TRANSCRIPTION_MODEL` | `whisper-1` | OpenAI transcription model for Telegram voice/audio |
@@ -355,6 +361,11 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### Unreleased -- Tool Pack Router
+- **Tool baskets + fast router** -- tools are grouped into thematic packs; `OUROBOROS_MODEL_LIGHT` preselects relevant packs before the main loop, reducing the initial schema surface from 42 tools to 7 base tools.
+- **Pack discovery tools** -- added `list_tool_packs` and `enable_tool_pack`; `list_available_tools` now groups inactive tools by pack instead of dumping a long flat list.
+- **Routing observability** -- logs selected packs, router confidence, active pack list, active tool count, and manual pack/tool enablement events.
 
 ### v6.2.0 -- Critical Bugfixes + LLM-First Dedup
 - **Fix: worker_id==0 hard-timeout bug** -- `int(x or -1)` treated worker 0 as -1, preventing terminate on timeout and causing double task execution. Replaced all `x or default` patterns with None-safe checks.

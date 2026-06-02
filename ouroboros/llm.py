@@ -20,7 +20,7 @@ DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.6"
 DEFAULT_OPENAI_MODEL = "gpt-5.2"
 DEFAULT_OPENAI_CODE_MODEL = "gpt-5.2-codex"
 DEFAULT_LIGHT_MODEL = "google/gemini-3-pro-preview"
-DEFAULT_OPENAI_LIGHT_MODEL = "gpt-4.1"
+DEFAULT_OPENAI_LIGHT_MODEL = "gpt-5.4-mini"
 
 
 def normalize_llm_provider(value: Optional[str] = None) -> str:

@@ -8,7 +8,6 @@ import os
 import json
 import asyncio
 import logging
-import httpx
 
 from ouroboros.utils import utc_now_iso
 from ouroboros.tools.registry import ToolEntry, ToolContext
@@ -129,6 +128,8 @@ async def _query_model(client, model, messages, api_key, semaphore):
 
 async def _multi_model_review_async(content: str, prompt: str, models: list, ctx: ToolContext):
     """Async orchestration: validate → query → parse → emit → return."""
+    import httpx
+
     # Validation
     if not content:
         return {"error": "content is required"}

@@ -42,8 +42,11 @@ TOOL_MODULES = [
     "ouroboros.tools.search",
     "ouroboros.tools.control",
     "ouroboros.tools.browser",
+    "ouroboros.tools.credit",
     "ouroboros.tools.documents",
+    "ouroboros.tools.hr",
     "ouroboros.tools.presentations",
+    "ouroboros.tools.polls",
     "ouroboros.tools.review",
     "ouroboros.tools.team",
 ]
@@ -57,6 +60,7 @@ SUPERVISOR_MODULES = [
     "supervisor.workers",
     "supervisor.git_ops",
     "supervisor.events",
+    "supervisor.polls",
     "supervisor.teams",
     "supervisor.teamchat",
     "supervisor.watchdog",
@@ -122,10 +126,18 @@ EXPECTED_TOOLS = [
     "forward_to_worker",
     # Context management
     "compact_context",
+    "list_tool_packs",
+    "enable_tool_pack",
     "list_available_tools",
     "enable_tools",
     # Team workspaces
     "team_inbox_send", "team_inbox_read", "team_chat_history", "team_chat_search", "team_members",
+    "team_poll_create", "team_poll_results", "team_poll_close",
+    # HR hiring
+    "hr_vacancy_audit", "hr_role_profile", "hr_candidate_screen", "hr_interview_kit", "hr_onboarding_checklist",
+    # Credit committee
+    "credit_pack_check", "credit_metrics_check", "credit_deck_challenge", "credit_speaker_qna",
+    "credit_committee_readiness", "credit_memo_draft", "credit_deck_outline",
 ]
 
 

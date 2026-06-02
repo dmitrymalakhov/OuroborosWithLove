@@ -151,7 +151,7 @@ if LLM_PROVIDER == "openai":
         _model_str = str(_model or "").strip()
         assert "/" not in _model_str or _model_str.startswith("openai/"), (
             f"{_name}={_model_str!r} is not compatible with OUROBOROS_LLM_PROVIDER=openai. "
-            "Use a native OpenAI model id such as 'gpt-5.2' or an openai/... id."
+            "Use a native OpenAI model id such as 'gpt-5.2', 'gpt-5.4-mini', or an openai/... id."
         )
 ADMIN_USER_IDS_RAW = get_cfg("OUROBOROS_ADMIN_USER_IDS", default="", allow_legacy_secret=True) or ""
 
@@ -317,6 +317,9 @@ from supervisor.teams import (
     init as teams_init,
 )
 teams_init(DRIVE_ROOT)
+
+from supervisor.polls import init as polls_init, handle_poll_update
+polls_init(DRIVE_ROOT)
 
 from supervisor.teamchat import TeamChatRuntime
 
@@ -614,6 +617,12 @@ while True:
 
     for upd in updates:
         offset = int(upd["update_id"]) + 1
+        poll_handled, poll_rec = handle_poll_update(DRIVE_ROOT, upd)
+        if poll_handled:
+            if poll_rec:
+                _last_message_ts = time.time()
+            continue
+
         callback_query = upd.get("callback_query")
         if isinstance(callback_query, dict):
             if _access.handle_callback(callback_query):

@@ -332,6 +332,7 @@ from supervisor.telegram import (
     save_incoming_document,
     send_with_budget,
 )
+from supervisor import telegram_images as image_helpers
 from supervisor.transcription import (
     audio_upload_name,
     format_audio_task_text,
@@ -663,25 +664,20 @@ while True:
 
         # Extract attachment metadata first; actual downloads happen only after
         # the workspace has been resolved and approved.
-        image_file_id = ""
+        image_meta = image_helpers.image_attachment_metadata(msg)
+        image_file_id = image_meta["file_id"]
         pending_audio = None
         pending_audio_type = ""
         pending_document = None
-        if msg.get("photo"):
-            best_photo = msg["photo"][-1]
-            image_file_id = str(best_photo.get("file_id") or "")
-        elif msg.get("voice"):
+        if not image_file_id and msg.get("voice"):
             pending_audio = msg["voice"]
             pending_audio_type = "voice"
-        elif msg.get("audio"):
+        elif not image_file_id and msg.get("audio"):
             pending_audio = msg["audio"]
             pending_audio_type = "audio"
-        elif msg.get("document"):
+        elif not image_file_id and msg.get("document"):
             doc = msg["document"]
-            mime_type = str(doc.get("mime_type") or "")
-            if mime_type.startswith("image/"):
-                image_file_id = str(doc.get("file_id") or "")
-            elif is_audio_attachment(doc):
+            if is_audio_attachment(doc):
                 pending_audio = doc
                 pending_audio_type = "document_audio"
             else:
@@ -798,10 +794,13 @@ while True:
             _access.notify_unnotified_requests()
 
         image_data = None
+        saved_image = None
+        image_download_failed = False
         if image_file_id:
-            b64, mime = TG.download_file_base64(image_file_id)
-            if b64:
-                image_data = (b64, mime, caption)
+            image_data, saved_image, image_download_failed = image_helpers.save_telegram_image_upload(
+                TG, user_drive_root, image_meta=image_meta, caption=caption,
+                message_id=int(msg.get("message_id") or 0), now_iso=now_iso,
+            )
 
         saved_audio = None
         audio_transcription = ""
@@ -941,6 +940,8 @@ while True:
             )
         elif audio_download_failed:
             log_text = (text or caption or "") + "\n[attached audio download failed]"
+        elif saved_image or image_download_failed:
+            log_text = image_helpers.image_log_text(text, caption, saved_image, image_download_failed)
         elif saved_document:
             log_text = (text or caption or "") + f"\n[attached document saved: {saved_document['path']}]"
         elif document_download_failed:
@@ -1011,6 +1012,9 @@ while True:
                 log_user_id=user_id,
             )
             continue
+        if image_download_failed:
+            image_helpers.send_image_download_failed(chat_id, user_drive_root, user_id)
+            continue
         if audio_download_failed:
             send_with_budget(
                 chat_id,
@@ -1046,14 +1050,7 @@ while True:
         if agent._busy or getattr(agent, "_dispatching", False):
             # BUSY PATH: inject into active conversation (single consumer)
             if image_data:
-                if text:
-                    agent.inject_message(text)
-                send_with_budget(
-                    chat_id,
-                    "📎 Photo received, but a task is in progress. Send again when I'm free.",
-                    log_drive_root=user_drive_root,
-                    log_user_id=user_id,
-                )
+                image_helpers.inject_busy_image(agent, chat_id, text, caption, saved_image, user_drive_root, user_id)
             elif saved_audio:
                 send_with_budget(
                     chat_id,
@@ -1116,6 +1113,8 @@ while True:
                     "Use analyze_document(path='<path>', source='drive') if the user asks about this file."
                 )
                 final_text = (text or caption or "Please analyze the attached document.") + doc_note
+            elif saved_image:
+                final_text = image_helpers.prepare_free_image_task(chat_id, text, caption, saved_image, user_drive_root, user_id)
             if is_admin:
                 _consciousness.pause()
 

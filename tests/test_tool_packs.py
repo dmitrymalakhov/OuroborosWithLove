@@ -56,6 +56,48 @@ def test_pack_dependencies_add_document_tools_for_credit(tmp_path):
     assert "drive_write" not in names
 
 
+def test_pack_dependencies_add_document_tools_for_document_editing(tmp_path):
+    reg = _registry(tmp_path)
+    names = _schema_names(reg.schemas_for_packs(["document_editing"]))
+
+    assert "inspect_pdf_for_edit" in names
+    assert "edit_pdf" in names
+    assert "inspect_word_for_edit" in names
+    assert "edit_word" in names
+    assert "analyze_document" in names
+    assert "send_file" in names
+    assert "drive_write" not in names
+
+
+@pytest.mark.parametrize("alias", ["pdf_editing", "pdf_edit", "word_editing", "word", "docx"])
+def test_document_editing_aliases_keep_legacy_names(tmp_path, alias):
+    reg = _registry(tmp_path)
+    tools = set(reg.get_tools_by_pack(alias, include_dependencies=True))
+
+    assert "inspect_pdf_for_edit" in tools
+    assert "edit_pdf" in tools
+    assert "inspect_word_for_edit" in tools
+    assert "edit_word" in tools
+    assert "analyze_document" in tools
+
+
+def test_web_browser_pack_is_browser_only(tmp_path):
+    reg = _registry(tmp_path)
+    names = _schema_names(reg.schemas_for_packs(["web_browser"], include_base=False))
+
+    assert names == {"web_search", "browse_page", "browser_action"}
+
+
+def test_vision_pack_contains_image_and_screenshot_tools(tmp_path):
+    reg = _registry(tmp_path)
+    names = _schema_names(reg.schemas_for_packs(["vision"], include_base=False))
+
+    assert "analyze_screenshot" in names
+    assert "vlm_query" in names
+    assert "edit_image" in names
+    assert "send_photo" in names
+
+
 def test_user_role_pack_filter_hides_admin_packs(tmp_path):
     reg = _registry(tmp_path, role="user")
     packs = {p["name"]: p for p in reg.list_tool_packs()}
@@ -110,7 +152,9 @@ class FakeRouterLLM:
     ("подготовь материалы для кредитного комитета", ["credit"]),
     ("проверь кандидата на роль аналитика", ["hr"]),
     ("прочитай PDF и сделай выводы", ["documents"]),
+    ("отредактируй PDF договор", ["document_editing"]),
     ("найди в интернете свежие источники", ["web_browser"]),
+    ("измени фото и убери фон", ["vision"]),
     ("измени код и посмотри git diff", ["code_git"]),
     ("привет, как дела", []),
 ])
@@ -120,8 +164,10 @@ def test_fast_router_selects_expected_pack(tmp_path, text, expected):
     mapping = {
         "кредитного комитета": (["credit"], 0.86),
         "кандидата": (["hr"], 0.82),
+        "отредактируй pdf": (["document_editing"], 0.88),
         "pdf": (["documents"], 0.9),
         "интернете": (["web_browser"], 0.88),
+        "фото": (["vision"], 0.87),
         "код": (["code_git"], 0.84),
     }
     reg = _registry(tmp_path, role="admin")

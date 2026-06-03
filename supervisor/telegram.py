@@ -49,6 +49,15 @@ _MIME_BY_EXTENSION = {
     "webm": "audio/webm",
 }
 
+_IMAGE_EXTENSION_BY_MIME = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+}
+
 
 def redact_telegram_token(text: str, token: str = "") -> str:
     safe = str(text or "")
@@ -260,13 +269,21 @@ class TelegramClient:
             log.debug("Failed to send chat action to chat_id=%d: %s", chat_id, self._format_error(e))
             return False
 
-    def send_photo(self, chat_id: int, photo_bytes: bytes,
-                   caption: str = "") -> Tuple[bool, str]:
+    def send_photo(
+        self,
+        chat_id: int,
+        photo_bytes: bytes,
+        caption: str = "",
+        filename: str = "image.png",
+        mime_type: str = "image/png",
+    ) -> Tuple[bool, str]:
         """Send a photo to a chat. photo_bytes is raw PNG/JPEG data."""
         last_err = "unknown"
+        display_name = filename or "image.png"
+        detected_mime = mime_type or "image/png"
         for attempt in range(3):
             try:
-                files = {"photo": ("screenshot.png", photo_bytes, "image/png")}
+                files = {"photo": (display_name, photo_bytes, detected_mime)}
                 data: Dict[str, Any] = {"chat_id": chat_id}
                 if caption:
                     data["caption"] = caption[:1024]
@@ -506,6 +523,39 @@ def save_incoming_document(
         message_id=message_id,
         event_type="telegram_document_saved",
         fallback_name="telegram_file",
+    )
+
+
+def save_incoming_image(
+    drive_root: pathlib.Path,
+    *,
+    file_bytes: bytes,
+    original_name: str,
+    mime_type: str,
+    telegram_file_id: str,
+    telegram_file_unique_id: str = "",
+    caption: str = "",
+    message_id: int = 0,
+) -> Dict[str, Any]:
+    """Persist a Telegram image/photo upload in the user's workspace and return metadata."""
+    clean_mime = str(mime_type or "").lower().strip()
+    suffix = pathlib.Path(str(original_name or "")).suffix
+    fallback_suffix = _IMAGE_EXTENSION_BY_MIME.get(clean_mime, ".jpg")
+    fallback_name = f"telegram_image{fallback_suffix}"
+    safe_original = original_name
+    if safe_original and not suffix and clean_mime in _IMAGE_EXTENSION_BY_MIME:
+        safe_original = safe_original + fallback_suffix
+    return _save_incoming_upload(
+        drive_root,
+        file_bytes=file_bytes,
+        original_name=safe_original,
+        mime_type=mime_type,
+        telegram_file_id=telegram_file_id,
+        telegram_file_unique_id=telegram_file_unique_id,
+        caption=caption,
+        message_id=message_id,
+        event_type="telegram_image_saved",
+        fallback_name=fallback_name,
     )
 
 

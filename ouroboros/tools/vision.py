@@ -12,13 +12,83 @@ Two tools:
 
 from __future__ import annotations
 
+import base64
+import datetime
 import logging
+import mimetypes
 import os
+import pathlib
 from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.utils import append_jsonl, safe_relpath, utc_now_iso
 
 log = logging.getLogger(__name__)
+
+IMAGE_EDIT_MAX_BYTES = 50 * 1024 * 1024
+IMAGE_EDIT_SUPPORTED_MIME = {"image/png", "image/jpeg", "image/webp"}
+IMAGE_EDIT_SUPPORTED_SUFFIX = {".png", ".jpg", ".jpeg", ".webp"}
+IMAGE_EDIT_SIZES = {"1024x1024", "1024x1536", "1536x1024", "auto"}
+IMAGE_EDIT_QUALITIES = {"low", "medium", "high", "auto"}
+IMAGE_EDIT_OUTPUT_FORMATS = {"png", "webp", "jpeg"}
+
+
+def _scope(ctx: ToolContext) -> Dict[str, Any]:
+    return {
+        "user_id": ctx.current_user_id,
+        "user_role": ctx.user_role,
+        "drive_root": str(ctx.drive_root),
+        "shared_drive_root": str(ctx.shared_drive_root or ctx.drive_root),
+    }
+
+
+def _log_image_edit_event(ctx: ToolContext, payload: Dict[str, Any]) -> None:
+    try:
+        event = {"ts": utc_now_iso(), **payload}
+        append_jsonl(ctx.drive_logs() / "events.jsonl", event)
+    except Exception:
+        log.debug("Failed to log image edit event", exc_info=True)
+
+
+def _get_openai_image_client(api_key: str):
+    from openai import OpenAI
+    return OpenAI(api_key=api_key)
+
+
+def _image_result_b64(result: Any) -> str:
+    data = getattr(result, "data", None)
+    if data is None and isinstance(result, dict):
+        data = result.get("data")
+    if not data:
+        return ""
+    first = data[0]
+    if isinstance(first, dict):
+        return str(first.get("b64_json") or "")
+    return str(getattr(first, "b64_json", "") or "")
+
+
+def _image_result_usage(result: Any) -> Dict[str, Any]:
+    usage = getattr(result, "usage", None)
+    if usage is None and isinstance(result, dict):
+        usage = result.get("usage")
+    if hasattr(usage, "model_dump"):
+        usage = usage.model_dump()
+    return usage if isinstance(usage, dict) else {}
+
+
+def _resolve_edit_image_path(ctx: ToolContext, path: str) -> pathlib.Path:
+    image_path = (ctx.drive_root / safe_relpath(path)).resolve()
+    root = ctx.drive_root.resolve()
+    image_path.relative_to(root)
+    return image_path
+
+
+def _detect_image_mime(path: pathlib.Path) -> str:
+    detected = mimetypes.guess_type(path.name)[0] or ""
+    if detected == "image/jpg":
+        return "image/jpeg"
+    return detected
+
 
 def _get_vlm_model() -> str:
     """Get VLM model from env or use default."""
@@ -97,6 +167,125 @@ def _vlm_query(ctx: ToolContext, prompt: str, image_url: str = "", image_base64:
     except Exception as e:
         log.warning("vlm_query failed: %s", e, exc_info=True)
         return f"⚠️ VLM query failed: {e}"
+
+
+def _edit_image(
+    ctx: ToolContext,
+    path: str,
+    prompt: str,
+    size: str = "auto",
+    quality: str = "auto",
+    output_format: str = "png",
+    send_to_chat: bool = True,
+    model: str = "",
+) -> str:
+    """Edit a workspace image using OpenAI Images API and optionally send it to Telegram."""
+    prompt = str(prompt or "").strip()
+    if not prompt:
+        return "⚠️ prompt is required."
+
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return "⚠️ OPENAI_API_KEY is not set; image editing is unavailable."
+
+    clean_size = str(size or "auto").strip().lower()
+    clean_quality = str(quality or "auto").strip().lower()
+    clean_output_format = str(output_format or "png").strip().lower()
+    if clean_size not in IMAGE_EDIT_SIZES:
+        return f"⚠️ Unsupported size: {size}. Use one of: {', '.join(sorted(IMAGE_EDIT_SIZES))}."
+    if clean_quality not in IMAGE_EDIT_QUALITIES:
+        return f"⚠️ Unsupported quality: {quality}. Use one of: {', '.join(sorted(IMAGE_EDIT_QUALITIES))}."
+    if clean_output_format not in IMAGE_EDIT_OUTPUT_FORMATS:
+        return f"⚠️ Unsupported output_format: {output_format}. Use one of: {', '.join(sorted(IMAGE_EDIT_OUTPUT_FORMATS))}."
+
+    try:
+        image_path = _resolve_edit_image_path(ctx, path)
+    except Exception:
+        return "⚠️ Path traversal is not allowed."
+    if not image_path.exists():
+        return f"⚠️ Image file not found: {path}"
+    if not image_path.is_file():
+        return f"⚠️ Not a file: {path}"
+    if image_path.stat().st_size > IMAGE_EDIT_MAX_BYTES:
+        return f"⚠️ Image is too large for OpenAI image editing: {image_path.stat().st_size} bytes"
+
+    image_mime = _detect_image_mime(image_path)
+    if image_mime not in IMAGE_EDIT_SUPPORTED_MIME or image_path.suffix.lower() not in IMAGE_EDIT_SUPPORTED_SUFFIX:
+        return "⚠️ Unsupported image type. Use PNG, JPEG, or WEBP under 50MB."
+
+    image_model = str(model or os.environ.get("OUROBOROS_IMAGE_MODEL") or "gpt-image-2").strip()
+    day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%H%M%S")
+    output_suffix = ".jpg" if clean_output_format == "jpeg" else f".{clean_output_format}"
+    output_rel = pathlib.PurePosixPath("generated") / "images" / day / f"{timestamp}_edited{output_suffix}"
+    output_path = ctx.drive_root / output_rel
+
+    try:
+        ctx.emit_progress_fn("Редактирую изображение через OpenAI Images API.")
+        client = _get_openai_image_client(api_key)
+        with image_path.open("rb") as image_file:
+            result = client.images.edit(
+                model=image_model,
+                image=image_file,
+                prompt=prompt,
+                size=clean_size,
+                quality=clean_quality,
+                output_format=clean_output_format,
+            )
+        image_b64 = _image_result_b64(result)
+        if not image_b64:
+            _log_image_edit_event(ctx, {
+                "type": "image_edit_failed",
+                "path": str(path),
+                "reason": "missing_b64_json",
+                "model": image_model,
+            })
+            return "⚠️ OpenAI image edit did not return image data."
+
+        image_bytes = base64.b64decode(image_b64)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(image_bytes)
+        usage = _image_result_usage(result)
+        _log_image_edit_event(ctx, {
+            "type": "image_edit_completed",
+            "source_path": str(path),
+            "output_path": str(output_rel),
+            "model": image_model,
+            "size": clean_size,
+            "quality": clean_quality,
+            "output_format": clean_output_format,
+            "usage": usage,
+        })
+
+        delivery = "skipped"
+        if send_to_chat and ctx.current_chat_id:
+            ctx.pending_events.append({
+                "type": "send_photo",
+                "chat_id": ctx.current_chat_id,
+                "image_base64": image_b64,
+                "caption": "Edited image",
+                "filename": output_path.name,
+                "mime_type": _detect_image_mime(output_path) or f"image/{clean_output_format}",
+                **_scope(ctx),
+            })
+            delivery = "queued"
+
+        return (
+            "OK: image edited\n"
+            f"- source_path: {path}\n"
+            f"- output_path: {output_rel}\n"
+            f"- model: {image_model}\n"
+            f"- telegram_delivery: {delivery}"
+        )
+    except Exception as e:
+        _log_image_edit_event(ctx, {
+            "type": "image_edit_failed",
+            "path": str(path),
+            "model": image_model,
+            "error": repr(e)[:1000],
+        })
+        log.warning("edit_image failed: %s", e, exc_info=True)
+        return f"⚠️ OpenAI image edit failed: {type(e).__name__}: {e}"
 
 
 def _emit_usage(ctx: ToolContext, usage: Dict[str, Any], model: str) -> None:
@@ -187,5 +376,60 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=_vlm_query,
             timeout_sec=30,
+        ),
+        ToolEntry(
+            name="edit_image",
+            schema={
+                "name": "edit_image",
+                "description": (
+                    "Edit a PNG, JPEG, or WEBP image saved in the current Drive workspace using OpenAI Images API. "
+                    "Use when the user sends a photo and asks to modify it, such as removing a background, changing "
+                    "lighting, replacing an object, or adding visual elements. Saves the edited image and can queue "
+                    "Telegram delivery to the active chat."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Image path relative to the user's Drive workspace.",
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Precise instruction describing how the image should be changed.",
+                        },
+                        "size": {
+                            "type": "string",
+                            "enum": ["1024x1024", "1024x1536", "1536x1024", "auto"],
+                            "default": "auto",
+                            "description": "Output image size.",
+                        },
+                        "quality": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high", "auto"],
+                            "default": "auto",
+                            "description": "Output quality.",
+                        },
+                        "output_format": {
+                            "type": "string",
+                            "enum": ["png", "webp", "jpeg"],
+                            "default": "png",
+                            "description": "Output image format. PNG is best for Telegram photo delivery.",
+                        },
+                        "send_to_chat": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": "Queue the edited image for Telegram delivery to the active chat.",
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "OpenAI image model override. Defaults to OUROBOROS_IMAGE_MODEL or gpt-image-2.",
+                        },
+                    },
+                    "required": ["path", "prompt"],
+                },
+            },
+            handler=_edit_image,
+            timeout_sec=180,
         ),
     ]

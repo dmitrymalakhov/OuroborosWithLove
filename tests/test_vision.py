@@ -1,7 +1,9 @@
 """Smoke tests for VLM (Vision Language Model) support."""
 
-import sys
+import base64
 import os
+import sys
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch, PropertyMock
 import pathlib
@@ -205,6 +207,113 @@ class TestVlmQueryTool(unittest.TestCase):
         tools = registry.available_tools()
         self.assertIn("analyze_screenshot", tools, "analyze_screenshot must be registered")
         self.assertIn("vlm_query", tools, "vlm_query must be registered")
+
+
+class TestEditImageTool(unittest.TestCase):
+    """Test the edit_image tool."""
+
+    def _make_ctx(self):
+        from ouroboros.tools.registry import ToolContext
+
+        tmp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(tmp.name)
+        repo = root / "repo"
+        drive = root / "drive"
+        repo.mkdir()
+        drive.mkdir()
+        ctx = ToolContext(
+            repo_dir=repo,
+            drive_root=drive,
+            current_chat_id=123,
+            current_user_id=456,
+            user_role="user",
+            emit_progress_fn=lambda _text: None,
+        )
+        return tmp, ctx
+
+    def test_edit_image_rejects_invalid_inputs(self):
+        from ouroboros.tools.vision import _edit_image
+
+        tmp, ctx = self._make_ctx()
+        self.addCleanup(tmp.cleanup)
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
+            result = _edit_image(ctx, path="missing.png", prompt="make it brighter")
+        self.assertIn("OPENAI_API_KEY", result)
+        self.assertEqual(ctx.pending_events, [])
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}):
+            result = _edit_image(ctx, path="missing.png", prompt="make it brighter")
+        self.assertIn("not found", result)
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}):
+            result = _edit_image(ctx, path="../outside.png", prompt="make it brighter")
+        self.assertIn("Path traversal", result)
+
+        (ctx.drive_root / "note.txt").write_text("not an image", encoding="utf-8")
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}):
+            result = _edit_image(ctx, path="note.txt", prompt="make it brighter")
+        self.assertIn("Unsupported image type", result)
+
+        (ctx.drive_root / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}):
+            result = _edit_image(ctx, path="image.png", prompt="")
+        self.assertIn("prompt is required", result)
+
+    def test_edit_image_calls_openai_saves_output_and_queues_photo(self):
+        from ouroboros.tools.vision import _edit_image
+
+        tmp, ctx = self._make_ctx()
+        self.addCleanup(tmp.cleanup)
+        (ctx.drive_root / "uploads").mkdir()
+        (ctx.drive_root / "uploads" / "photo.png").write_bytes(b"\x89PNG\r\n\x1a\nsource")
+
+        edited_b64 = base64.b64encode(b"edited-image-bytes").decode("ascii")
+        response = MagicMock()
+        response.data = [MagicMock(b64_json=edited_b64)]
+        response.usage = {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}
+        mock_client = MagicMock()
+        mock_client.images.edit.return_value = response
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key", "OUROBOROS_IMAGE_MODEL": "gpt-image-2"}), \
+                patch("ouroboros.tools.vision._get_openai_image_client", return_value=mock_client):
+            result = _edit_image(
+                ctx,
+                path="uploads/photo.png",
+                prompt="remove the background",
+                size="1024x1024",
+                quality="high",
+                output_format="png",
+            )
+
+        self.assertIn("OK: image edited", result)
+        self.assertIn("telegram_delivery: queued", result)
+        call_kwargs = mock_client.images.edit.call_args.kwargs
+        self.assertEqual(call_kwargs["model"], "gpt-image-2")
+        self.assertEqual(call_kwargs["prompt"], "remove the background")
+        self.assertEqual(call_kwargs["size"], "1024x1024")
+        self.assertEqual(call_kwargs["quality"], "high")
+        self.assertEqual(call_kwargs["output_format"], "png")
+
+        generated = list((ctx.drive_root / "generated" / "images").glob("*/*_edited.png"))
+        self.assertEqual(len(generated), 1)
+        self.assertEqual(generated[0].read_bytes(), b"edited-image-bytes")
+        self.assertEqual(len(ctx.pending_events), 1)
+        event = ctx.pending_events[0]
+        self.assertEqual(event["type"], "send_photo")
+        self.assertEqual(event["chat_id"], 123)
+        self.assertEqual(event["image_base64"], edited_b64)
+        self.assertEqual(event["mime_type"], "image/png")
+
+    def test_edit_image_tool_registered(self):
+        from ouroboros.tools.registry import ToolRegistry
+
+        registry = ToolRegistry(
+            repo_dir=pathlib.Path("/tmp"),
+            drive_root=pathlib.Path("/tmp"),
+        )
+        tools = registry.available_tools()
+        self.assertIn("edit_image", tools, "edit_image must be registered")
 
 
 if __name__ == "__main__":

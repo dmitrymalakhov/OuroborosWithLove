@@ -6,6 +6,7 @@ Run: pytest tests/test_message_routing.py -v
 """
 
 import json
+import importlib
 import pathlib
 import sys
 import os
@@ -98,6 +99,50 @@ class TestForwardToWorkerTool(unittest.TestCase):
         )
         tools = registry.available_tools()
         self.assertIn("forward_to_worker", tools)
+
+
+class TestDirectChatImageRouting(unittest.TestCase):
+    """Test image task payload routing for Telegram photo edits."""
+
+    def test_handle_chat_direct_preserves_image_note_and_image_context(self):
+        with unittest.mock.patch.dict(sys.modules, {"requests": unittest.mock.MagicMock()}):
+            workers = importlib.import_module("supervisor.workers")
+
+        class FakeAgent:
+            def __init__(self):
+                self.task = None
+
+            def handle_task(self, task):
+                self.task = task
+                return []
+
+        fake_agent = FakeAgent()
+        fake_queue = unittest.mock.MagicMock()
+        text = (
+            "\n\n[Telegram image saved]\n"
+            "- path: uploads/2026-06-03/42_telegram_photo_42.jpg\n"
+            "- filename: telegram_photo_42.jpg\n"
+            "- mime_type: image/jpeg\n"
+            "- size_bytes: 123\n"
+            "Use edit_image(path='<path>', prompt='<requested edit>') when the user asks to modify this image."
+        )
+
+        with unittest.mock.patch.object(workers, "_get_chat_agent", return_value=fake_agent), \
+                unittest.mock.patch.object(workers, "get_event_q", return_value=fake_queue):
+            workers.handle_chat_direct(
+                123,
+                text,
+                image_data=("base64-image", "image/jpeg", "убери фон"),
+                user_id=456,
+                user_role="user",
+                drive_root=pathlib.Path("/tmp/drive"),
+            )
+
+        self.assertIsNotNone(fake_agent.task)
+        self.assertIn("uploads/2026-06-03/42_telegram_photo_42.jpg", fake_agent.task["text"])
+        self.assertEqual(fake_agent.task["image_base64"], "base64-image")
+        self.assertEqual(fake_agent.task["image_mime"], "image/jpeg")
+        self.assertEqual(fake_agent.task["image_caption"], "убери фон")
 
 
 if __name__ == "__main__":

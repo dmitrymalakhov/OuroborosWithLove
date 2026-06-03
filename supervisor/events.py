@@ -538,10 +538,18 @@ def _handle_send_photo(evt: Dict[str, Any], ctx: Any) -> None:
         chat_id = int(evt.get("chat_id") or 0)
         image_b64 = str(evt.get("image_base64") or "")
         caption = str(evt.get("caption") or "")
+        filename = str(evt.get("filename") or "image.png")
+        mime_type = str(evt.get("mime_type") or "image/png")
         if not chat_id or not image_b64:
             return
         photo_bytes = b64mod.b64decode(image_b64)
-        ok, err = ctx.TG.send_photo(chat_id, photo_bytes, caption=caption)
+        ok, err = ctx.TG.send_photo(
+            chat_id,
+            photo_bytes,
+            caption=caption,
+            filename=filename,
+            mime_type=mime_type,
+        )
         if not ok:
             ctx.append_jsonl(
                 ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",

@@ -107,8 +107,9 @@ def get_tools() -> List[ToolEntry]:
                 "name": "list_tool_packs",
                 "description": (
                     "List thematic tool packs such as documents, web_browser, code_git, "
-                    "credit, hr, team, memory, and admin_control. Use this before enabling "
-                    "tools when the active pack does not fit the task."
+                    "vision, document_editing, spreadsheets, credit, hr, team, memory, "
+                    "and admin_control. Use this before enabling tools when the active "
+                    "pack does not fit the task."
                 ),
                 "parameters": {
                     "type": "object",

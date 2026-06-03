@@ -109,9 +109,14 @@ TOOL_PACKS: Dict[str, Set[str]] = {
     "documents": {
         "analyze_document", "extract_archive", "download_url_to_drive", "send_file",
     },
+    "document_editing": {
+        "inspect_pdf_for_edit", "edit_pdf", "inspect_word_for_edit", "edit_word",
+    },
     "web_browser": {
-        "web_search", "browse_page", "browser_action", "analyze_screenshot",
-        "vlm_query", "send_photo",
+        "web_search", "browse_page", "browser_action",
+    },
+    "vision": {
+        "analyze_screenshot", "vlm_query", "edit_image", "send_photo",
     },
     "code_git": {
         "repo_read", "repo_list", "repo_write_commit", "repo_commit_push",
@@ -132,6 +137,9 @@ TOOL_PACKS: Dict[str, Set[str]] = {
     },
     "presentation": {
         "create_presentation",
+    },
+    "spreadsheets": {
+        "inspect_excel_template", "fill_excel_template",
     },
     "credit": {
         "credit_pack_check", "credit_metrics_check", "credit_deck_challenge",
@@ -161,12 +169,15 @@ TOOL_PACK_DESCRIPTIONS: Dict[str, str] = {
     "base": "Always-on minimal discovery, memory, and context tools.",
     "files": "Read, list, and write workspace files.",
     "documents": "Analyze PDFs, archives, office documents, and downloadable files.",
-    "web_browser": "Search the web, browse pages, automate browser actions, and inspect screenshots/images.",
+    "document_editing": "Inspect and edit PDF/DOCX copies with redactions, overlays, text edits, comments, and form/table updates.",
+    "web_browser": "Search the web, browse pages, and automate browser actions.",
+    "vision": "Analyze screenshots/images, edit images, and send images back to Telegram.",
     "code_git": "Inspect and modify the repository, run shell/code tools, and use git.",
     "memory": "Persistent memory, knowledge topics, identity, and dialogue summaries.",
     "orchestration": "Schedule, poll, cancel, and route background tasks.",
     "team": "Approved Telegram team workspace history, inbox, members, and polls.",
     "presentation": "Create PowerPoint decks.",
+    "spreadsheets": "Inspect and fill Excel .xlsx templates while preserving workbook formatting and formulas.",
     "credit": "Corporate credit committee preparation, challenge, memo, metrics, and Q&A workflows.",
     "hr": "Hiring playbook workflows: vacancy audit, role profile, screening, interviews, onboarding.",
     "health_review": "Codebase health checks, evolution stats, and multi-model review.",
@@ -176,6 +187,8 @@ TOOL_PACK_DESCRIPTIONS: Dict[str, str] = {
 
 
 TOOL_PACK_DEPENDENCIES: Dict[str, Set[str]] = {
+    "document_editing": {"documents"},
+    "spreadsheets": {"documents"},
     "credit": {"documents"},
     "hr": {"documents"},
 }
@@ -189,6 +202,23 @@ TOOL_PACK_ALIASES: Dict[str, str] = {
     "github_issues": "github",
     "credit_committee": "credit",
     "hiring": "hr",
+    "pdf_editing": "document_editing",
+    "pdf_edit": "document_editing",
+    "pdf_edits": "document_editing",
+    "pdf_editor": "document_editing",
+    "word_editing": "document_editing",
+    "word": "document_editing",
+    "docx": "document_editing",
+    "word_edit": "document_editing",
+    "word_editor": "document_editing",
+    "image": "vision",
+    "images": "vision",
+    "image_edit": "vision",
+    "image_editing": "vision",
+    "photo": "vision",
+    "photos": "vision",
+    "spreadsheet": "spreadsheets",
+    "excel": "spreadsheets",
 }
 
 

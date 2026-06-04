@@ -26,6 +26,8 @@ from supervisor.users import (
     set_user_access_status,
 )
 
+USER_ACTIVITY_VIEW = "last_seen"
+
 
 def access_user_label(rec: Dict[str, Any]) -> str:
     uid = int(rec.get("user_id") or 0)
@@ -222,6 +224,34 @@ def _user_list_detail_lines(rec: Dict[str, Any], status: str, request_count: int
     return [
         f"   {_user_list_identity(rec)} · запросов: {request_count}",
         f"   {date_label}: {_format_dt(when)}",
+    ]
+
+
+def _user_access_status_label(rec: Dict[str, Any]) -> str:
+    status = str(rec.get("access_status") or "").strip().lower()
+    return {
+        ACCESS_PENDING: "заявка",
+        ACCESS_APPROVED: "доступ",
+        ACCESS_DENIED: "отключён",
+    }.get(status, status or "-")
+
+
+def _user_activity_sort_key(rec: Dict[str, Any]) -> Tuple[str, int]:
+    return (
+        str(rec.get("last_seen_at") or rec.get("created_at") or ""),
+        int(rec.get("user_id") or 0),
+    )
+
+
+def _sort_users_by_activity(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(records, key=_user_activity_sort_key, reverse=True)
+
+
+def _user_activity_detail_lines(rec: Dict[str, Any], request_count: int) -> List[str]:
+    when = rec.get("last_seen_at") or rec.get("created_at")
+    return [
+        f"   {_user_list_identity(rec)} · статус: {_user_access_status_label(rec)} · запросов: {request_count}",
+        f"   последний раз: {_format_dt(when)}",
     ]
 
 
@@ -460,6 +490,23 @@ class AccessRuntime:
             ])
         return "\n".join(lines)
 
+    def format_recent_users(self) -> str:
+        records = _sort_users_by_activity(list_user_records(self.drive_root))
+        title = "🕘 Пользователи по активности"
+        if not records:
+            return f"{title}: пусто."
+
+        visible = records[:20]
+        request_counts = _user_request_counts(self.drive_root, visible)
+        lines = [f"{title}: {len(records)}", ""]
+        for idx, rec in enumerate(visible, start=1):
+            uid = int(rec.get("user_id") or 0)
+            lines.append(f"{idx}. {_user_name(rec)}")
+            lines.extend(_user_activity_detail_lines(rec, request_counts.get(uid, 0)))
+        if len(records) > len(visible):
+            lines.append(f"\nПоказаны первые {len(visible)} из {len(records)}.")
+        return "\n".join(lines)
+
     def format_admin_home(self) -> str:
         user_pending = len(list_user_records(self.drive_root, access_status=ACCESS_PENDING))
         user_approved = len(list_user_records(self.drive_root, access_status=ACCESS_APPROVED))
@@ -501,6 +548,7 @@ class AccessRuntime:
                     {"text": f"✅ Доступ: {user_approved}", "callback_data": "admin:users:approved"},
                     {"text": f"⛔️ Отключены: {user_denied}", "callback_data": "admin:users:denied"},
                 ],
+                [{"text": "🕘 По активности", "callback_data": f"admin:users:{USER_ACTIVITY_VIEW}"}],
                 [{"text": f"👥 Заявки групп: {group_pending}", "callback_data": "admin:groups:pending"}],
                 [
                     {"text": f"✅ Группы: {group_approved}", "callback_data": "admin:groups:approved"},
@@ -518,34 +566,53 @@ class AccessRuntime:
             rows.append(buttons[idx:idx + columns])
         return rows
 
-    def user_records_keyboard(self, status: str) -> Dict[str, Any]:
-        records = list_user_records(self.drive_root, access_status=status)[:20]
+    def _user_decision_rows(
+        self,
+        records: List[Dict[str, Any]],
+        view_name: str,
+    ) -> List[List[Dict[str, str]]]:
         rows: List[List[Dict[str, str]]] = []
         buttons: List[Dict[str, str]] = []
         for idx, rec in enumerate(records, start=1):
             uid = int(rec.get("user_id") or 0)
+            status = str(rec.get("access_status") or ACCESS_APPROVED).strip().lower()
             if status == ACCESS_PENDING:
                 rows.append([
-                    {"text": f"✅ {idx}", "callback_data": f"access:approve:{uid}:users:pending"},
-                    {"text": f"⛔️ {idx}", "callback_data": f"access:deny:{uid}:users:pending"},
+                    {"text": f"✅ {idx}", "callback_data": f"access:approve:{uid}:users:{view_name}"},
+                    {"text": f"⛔️ {idx}", "callback_data": f"access:deny:{uid}:users:{view_name}"},
                 ])
             elif status == ACCESS_APPROVED:
-                buttons.append({"text": f"⛔️ {idx}", "callback_data": f"access:deny:{uid}:users:approved"})
+                buttons.append({"text": f"⛔️ {idx}", "callback_data": f"access:deny:{uid}:users:{view_name}"})
             else:
-                buttons.append({"text": f"✅ {idx}", "callback_data": f"access:approve:{uid}:users:denied"})
+                buttons.append({"text": f"✅ {idx}", "callback_data": f"access:approve:{uid}:users:{view_name}"})
         if buttons:
             rows.extend(self._numbered_rows(buttons))
-        rows.extend([
+        return rows
+
+    def _user_navigation_rows(self, refresh_callback: str) -> List[List[Dict[str, str]]]:
+        return [
             [
                 {"text": "Заявки", "callback_data": "admin:users:pending"},
                 {"text": "Доступ", "callback_data": "admin:users:approved"},
                 {"text": "Отключены", "callback_data": "admin:users:denied"},
             ],
+            [{"text": "🕘 Активность", "callback_data": f"admin:users:{USER_ACTIVITY_VIEW}"}],
             [
                 {"text": "⬅️ Меню", "callback_data": "admin:home"},
-                {"text": "🔄 Обновить", "callback_data": f"admin:users:{status}"},
+                {"text": "🔄 Обновить", "callback_data": refresh_callback},
             ],
-        ])
+        ]
+
+    def user_records_keyboard(self, status: str) -> Dict[str, Any]:
+        records = list_user_records(self.drive_root, access_status=status)[:20]
+        rows = self._user_decision_rows(records, status)
+        rows.extend(self._user_navigation_rows(f"admin:users:{status}"))
+        return {"inline_keyboard": rows}
+
+    def recent_user_records_keyboard(self) -> Dict[str, Any]:
+        records = _sort_users_by_activity(list_user_records(self.drive_root))[:20]
+        rows = self._user_decision_rows(records, USER_ACTIVITY_VIEW)
+        rows.extend(self._user_navigation_rows(f"admin:users:{USER_ACTIVITY_VIEW}"))
         return {"inline_keyboard": rows}
 
     def format_team_records(self, status: str) -> str:
@@ -609,6 +676,14 @@ class AccessRuntime:
             chat_id,
             self.format_records(status),
             self.user_records_keyboard(status),
+            force_budget=True,
+        )
+
+    def send_recent_user_admin_view(self, chat_id: int) -> None:
+        self._send_markup_or_text(
+            chat_id,
+            self.format_recent_users(),
+            self.recent_user_records_keyboard(),
             force_budget=True,
         )
 
@@ -713,6 +788,14 @@ class AccessRuntime:
             "denied": ACCESS_DENIED,
             "rejected": ACCESS_DENIED,
         }
+        user_activity_aliases = {
+            USER_ACTIVITY_VIEW,
+            "activity",
+            "active",
+            "recent",
+            "last",
+            "last_seen",
+        }
         group_status_aliases = {
             "pending": TEAM_CHAT_PENDING,
             "requests": TEAM_CHAT_PENDING,
@@ -728,6 +811,9 @@ class AccessRuntime:
             section = parts[1].lower()
             status_name = parts[2].lower() if len(parts) > 2 else "pending"
             if section in ("users", "user", "access"):
+                if status_name in user_activity_aliases:
+                    self.send_recent_user_admin_view(chat_id)
+                    return True
                 self.send_user_admin_view(chat_id, user_status_aliases.get(status_name, ACCESS_PENDING))
                 return True
             if section in ("groups", "group", "teamchat", "teams"):
@@ -758,6 +844,9 @@ class AccessRuntime:
                 return True
             if subcommand in ("denied", "rejected"):
                 self.send_with_budget_fn(chat_id, self.format_records(ACCESS_DENIED), force_budget=True)
+                return True
+            if subcommand in user_activity_aliases:
+                self.send_with_budget_fn(chat_id, self.format_recent_users(), force_budget=True)
                 return True
             if subcommand in ("approve", "allow"):
                 action = "approve"
@@ -840,6 +929,14 @@ class AccessRuntime:
                 return True
             section, status_name = parts[1], parts[2]
             if section == "users":
+                if status_name == USER_ACTIVITY_VIEW:
+                    self._edit_or_send_callback_view(
+                        callback_query,
+                        self.format_recent_users(),
+                        self.recent_user_records_keyboard(),
+                    )
+                    self._answer_callback(callback_query, "Активность пользователей обновлена.")
+                    return True
                 status = {
                     "pending": ACCESS_PENDING,
                     "approved": ACCESS_APPROVED,
@@ -892,6 +989,13 @@ class AccessRuntime:
         message_chat_id = int(message_chat.get("id") or 0)
         message_id = int(message.get("message_id") or 0)
         if ok and len(parts) == 5 and parts[3] == "users":
+            if parts[4] == USER_ACTIVITY_VIEW:
+                self._edit_or_send_callback_view(
+                    callback_query,
+                    self.format_recent_users(),
+                    self.recent_user_records_keyboard(),
+                )
+                return True
             status = {
                 "pending": ACCESS_PENDING,
                 "approved": ACCESS_APPROVED,

@@ -220,6 +220,7 @@ def test_admin_menu_command_sends_user_and_group_sections():
         callbacks = {button["callback_data"] for row in keyboard for button in row}
         assert "admin:users:pending" in callbacks
         assert "admin:groups:pending" in callbacks
+        assert "admin:users:last_seen" in callbacks
 
 
 def test_admin_user_list_is_numbered_and_keyboard_is_compact():
@@ -265,6 +266,70 @@ def test_admin_user_list_is_numbered_and_keyboard_is_compact():
         assert "T" not in text
         assert "⛔️ 1" in button_texts
         assert all(len(label) <= 16 for label in button_texts)
+
+
+def test_admin_recent_user_view_sorts_by_last_seen():
+    from supervisor.access_control import AccessRuntime
+    from supervisor.users import ACCESS_APPROVED, request_user_access, set_user_access_status
+
+    with tempfile.TemporaryDirectory() as tmp:
+        drive_root = pathlib.Path(tmp)
+        request_user_access(drive_root, user_id=111, chat_id=111, from_user={"username": "old"})
+        request_user_access(drive_root, user_id=222, chat_id=222, from_user={"username": "new"})
+        set_user_access_status(drive_root, [111, 222], ACCESS_APPROVED, decided_by=1)
+        users_path = drive_root / "state" / "users.json"
+        data = json.loads(users_path.read_text(encoding="utf-8"))
+        data["users"]["111"]["last_seen_at"] = "2026-06-01T10:00:00+00:00"
+        data["users"]["222"]["last_seen_at"] = "2026-06-03T12:30:00+00:00"
+        users_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        runtime = AccessRuntime(
+            drive_root=drive_root,
+            admin_chat_ids_fn=lambda: [1],
+            load_state_fn=lambda: {"owner_id": 1},
+            send_with_budget_fn=lambda *args, **kwargs: None,
+        )
+
+        text = runtime.format_recent_users()
+        keyboard = runtime.recent_user_records_keyboard()
+        callbacks = {button["callback_data"] for row in keyboard["inline_keyboard"] for button in row}
+
+        assert text.index("1. @new") < text.index("2. @old")
+        assert "последний раз: 03.06 12:30" in text
+        assert "статус: доступ" in text
+        assert "access:deny:222:users:last_seen" in callbacks
+        assert "admin:users:last_seen" in callbacks
+
+
+def test_admin_recent_user_callback_edits_activity_view():
+    from supervisor.access_control import AccessRuntime
+    from supervisor.users import ACCESS_APPROVED, request_user_access, set_user_access_status
+
+    with tempfile.TemporaryDirectory() as tmp:
+        drive_root = pathlib.Path(tmp)
+        request_user_access(drive_root, user_id=123, chat_id=456, from_user={"username": "alice"})
+        set_user_access_status(drive_root, [123], ACCESS_APPROVED, decided_by=1)
+        tg = FakeAccessTG()
+        runtime = AccessRuntime(
+            drive_root=drive_root,
+            admin_chat_ids_fn=lambda: [1],
+            load_state_fn=lambda: {"owner_id": 1},
+            send_with_budget_fn=lambda *args, **kwargs: None,
+            tg=tg,
+            is_admin_user_fn=lambda user_id, st: user_id == 1,
+        )
+
+        handled = runtime.handle_callback({
+            "id": "cb1",
+            "data": "admin:users:last_seen",
+            "from": {"id": 1},
+            "message": {"chat": {"id": 1}, "message_id": 77},
+        })
+
+        assert handled is True
+        assert tg.edits
+        assert "Пользователи по активности" in tg.edits[-1][2]
+        callbacks = {button["callback_data"] for row in tg.edits[-1][3]["inline_keyboard"] for button in row}
+        assert "access:deny:123:users:last_seen" in callbacks
 
 
 def test_access_runtime_list_callback_refreshes_same_view():

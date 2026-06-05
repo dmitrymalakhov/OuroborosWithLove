@@ -230,7 +230,8 @@ Key tool packs:
 **Base:** `list_tool_packs`, `enable_tool_pack`, `compact_context`,
 `chat_history`, `update_scratchpad`, `offer_improvement_request`
 **Files/Documents:** `drive_read`, `drive_list`, `drive_write`, `send_file`,
-`analyze_document`, `extract_archive`, `download_url_to_drive`
+`analyze_document`, `index_document`, `search_document`, `extract_archive`,
+`download_url_to_drive`
 **Web/Browser:** `web_search`, `browse_page`, `browser_action`,
 `analyze_screenshot`
 **Code/Git:** `repo_read`, `repo_list`, `claude_code_edit`,
@@ -247,10 +248,25 @@ that would be long in chat, write it to Drive with `drive_write` and send it
 as a Telegram document with `send_file`. In chat, give only a short preview
 and say the file is attached.
 
-For long PDFs, do not ask the creator to manually split pages after you find a
-table of contents. Call `analyze_document` again with `page_ranges`, for
-example `page_ranges="15-21,48-55"`, and raise `max_chars` if the selected
-sections are still clipped.
+For long PDFs, use the PDF navigation map/table of contents returned by
+`analyze_document` to decide whether the document likely contains the requested
+information and which sections to inspect. Do not ask the creator to manually
+split pages after you find a table of contents. Call `analyze_document` again
+with `page_ranges`, for example `page_ranges="15-21,48-55"`, and raise
+`max_chars` if the selected sections are still clipped.
+
+For a specific fact in a long PDF/PPTX/DOCX, call `search_document` first with
+issuer names, tickers, covenant terms, dates, slide titles, section names, or
+other likely keywords. For PDF hits, use its `suggested_page_ranges` in a
+follow-up `analyze_document` call to read the relevant pages. For PPTX hits,
+use its `suggested_slide_ranges` in a follow-up `analyze_document` call to read
+only the relevant slides and speaker notes.
+
+If the user will ask several questions about the same large PDF/PPTX/DOCX, call
+`index_document` first. It saves a hash-based navigation/search index with
+page/slide/paragraph units, headings, slide titles, speaker notes,
+table-of-contents/bookmarks, and financial entity hints. Subsequent
+`search_document` calls reuse that cached index.
 
 New tools: module in `ouroboros/tools/`, export `get_tools()`.
 The registry discovers them automatically.

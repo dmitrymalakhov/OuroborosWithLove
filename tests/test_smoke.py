@@ -106,7 +106,7 @@ EXPECTED_TOOLS = [
     "git_status", "git_diff",
     "run_shell", "claude_code_edit",
     "browse_page", "browser_action",
-    "analyze_document", "extract_archive", "download_url_to_drive",
+    "analyze_document", "index_document", "search_document", "extract_archive", "download_url_to_drive",
     "inspect_pdf_for_edit", "edit_pdf",
     "inspect_word_for_edit", "edit_word",
     "inspect_excel_template", "fill_excel_template",

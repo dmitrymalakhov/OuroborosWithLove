@@ -52,6 +52,8 @@ def test_pack_dependencies_add_document_tools_for_credit(tmp_path):
     assert "credit_pack_check" in names
     assert "credit_deck_challenge" in names
     assert "analyze_document" in names
+    assert "index_document" in names
+    assert "search_document" in names
     assert "send_file" in names
     assert "drive_write" not in names
 
@@ -65,6 +67,7 @@ def test_pack_dependencies_add_document_tools_for_document_editing(tmp_path):
     assert "inspect_word_for_edit" in names
     assert "edit_word" in names
     assert "analyze_document" in names
+    assert "search_document" in names
     assert "send_file" in names
     assert "drive_write" not in names
 
@@ -79,6 +82,7 @@ def test_document_editing_aliases_keep_legacy_names(tmp_path, alias):
     assert "inspect_word_for_edit" in tools
     assert "edit_word" in tools
     assert "analyze_document" in tools
+    assert "search_document" in tools
 
 
 def test_web_browser_pack_is_browser_only(tmp_path):

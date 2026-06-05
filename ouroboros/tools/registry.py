@@ -107,7 +107,7 @@ TOOL_PACKS: Dict[str, Set[str]] = {
         "drive_read", "drive_list", "drive_write",
     },
     "documents": {
-        "analyze_document", "extract_archive", "download_url_to_drive", "send_file",
+        "analyze_document", "index_document", "search_document", "extract_archive", "download_url_to_drive", "send_file",
     },
     "document_editing": {
         "inspect_pdf_for_edit", "edit_pdf", "inspect_word_for_edit", "edit_word",

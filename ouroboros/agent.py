@@ -32,6 +32,7 @@ from ouroboros.tools.registry import ToolContext
 from ouroboros.memory import Memory
 from ouroboros.context import build_llm_messages
 from ouroboros.loop import run_llm_loop
+from ouroboros.svg_delivery import SVG_MIME_TYPE, extract_svg_attachments
 
 
 # ---------------------------------------------------------------------------
@@ -509,6 +510,36 @@ class OuroborosAgent:
         # (_emit_llm_usage_event). Do NOT emit an aggregate llm_usage here —
         # that would double-count in update_budget_from_usage.
         # Cost/token summaries are carried by task_metrics and task_done events.
+        svg_document_events: List[Dict[str, Any]] = []
+        try:
+            cleaned_text, svg_attachments = extract_svg_attachments(
+                text,
+                self.env.drive_root,
+                task_id=str(task.get("id") or ""),
+            )
+            if svg_attachments:
+                text = cleaned_text
+                for attachment in svg_attachments:
+                    svg_document_events.append({
+                        "type": "send_document",
+                        "chat_id": task["chat_id"],
+                        "path": attachment.rel_path,
+                        "caption": attachment.filename,
+                        "filename": attachment.filename,
+                        "mime_type": SVG_MIME_TYPE,
+                        "task_id": task.get("id"),
+                        "ts": utc_now_iso(),
+                        **self._event_scope(),
+                    })
+                append_jsonl(drive_logs / "events.jsonl", {
+                    "ts": utc_now_iso(),
+                    "type": "svg_attachments_extracted",
+                    "task_id": task.get("id"),
+                    "count": len(svg_attachments),
+                    "paths": [item.rel_path for item in svg_attachments],
+                })
+        except Exception as e:
+            log.warning("Failed to extract SVG attachments from response: %s", e, exc_info=True)
 
         self._pending_events.append({
             "type": "send_message", "chat_id": task["chat_id"],
@@ -517,6 +548,7 @@ class OuroborosAgent:
             "task_id": task.get("id"), "ts": utc_now_iso(),
             **self._event_scope(),
         })
+        self._pending_events.extend(svg_document_events)
 
         improvement_offer = getattr(self.tools._ctx, "_pending_improvement_offer", None)
         if isinstance(improvement_offer, dict):

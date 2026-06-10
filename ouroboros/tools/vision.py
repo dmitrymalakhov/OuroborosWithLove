@@ -26,8 +26,11 @@ from ouroboros.utils import append_jsonl, safe_relpath, utc_now_iso
 log = logging.getLogger(__name__)
 
 IMAGE_EDIT_MAX_BYTES = 50 * 1024 * 1024
+IMAGE_ANALYSIS_MAX_BYTES = 50 * 1024 * 1024
 IMAGE_EDIT_SUPPORTED_MIME = {"image/png", "image/jpeg", "image/webp"}
 IMAGE_EDIT_SUPPORTED_SUFFIX = {".png", ".jpg", ".jpeg", ".webp"}
+IMAGE_ANALYSIS_SUPPORTED_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"}
+IMAGE_ANALYSIS_SUPPORTED_SUFFIX = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 IMAGE_EDIT_SIZES = {"1024x1024", "1024x1536", "1536x1024", "auto"}
 IMAGE_EDIT_QUALITIES = {"low", "medium", "high", "auto"}
 IMAGE_EDIT_OUTPUT_FORMATS = {"png", "webp", "jpeg"}
@@ -90,6 +93,45 @@ def _detect_image_mime(path: pathlib.Path) -> str:
     return detected
 
 
+def _resolve_image_analysis_path(ctx: ToolContext, path: str, source: str = "drive") -> pathlib.Path:
+    if not path or not isinstance(path, str):
+        raise ValueError("path must be a non-empty string")
+
+    source = (source or "drive").strip().lower()
+    if source not in {"drive", "repo"}:
+        raise ValueError("source must be 'drive' or 'repo'")
+    if source == "repo" and str(ctx.user_role or "user").lower() != "admin":
+        raise PermissionError("source='repo' is admin-only in multi-user mode")
+
+    root = ctx.repo_dir if source == "repo" else ctx.drive_root
+    root = root.resolve()
+    image_path = (root / safe_relpath(path)).resolve()
+    try:
+        image_path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Path traversal is not allowed") from exc
+    return image_path
+
+
+def _image_payload_from_path(ctx: ToolContext, path: str, source: str = "drive") -> Dict[str, str]:
+    image_path = _resolve_image_analysis_path(ctx, path, source=source)
+    if not image_path.exists():
+        raise FileNotFoundError(f"Image file not found: {path}")
+    if not image_path.is_file():
+        raise ValueError(f"Image path is not a file: {path}")
+    if image_path.stat().st_size > IMAGE_ANALYSIS_MAX_BYTES:
+        raise ValueError(f"Image is too large: {image_path.stat().st_size} bytes")
+
+    image_mime = _detect_image_mime(image_path)
+    if image_mime not in IMAGE_ANALYSIS_SUPPORTED_MIME or image_path.suffix.lower() not in IMAGE_ANALYSIS_SUPPORTED_SUFFIX:
+        raise ValueError("Unsupported image type. Use PNG, JPEG, WEBP, GIF, or BMP under 50MB.")
+
+    return {
+        "base64": base64.b64encode(image_path.read_bytes()).decode("ascii"),
+        "mime": image_mime,
+    }
+
+
 def _get_vlm_model() -> str:
     """Get VLM model from env or use default."""
     from ouroboros.llm import default_main_model
@@ -136,15 +178,29 @@ def _analyze_screenshot(ctx: ToolContext, prompt: str = "Describe what you see i
         return f"⚠️ VLM analysis failed: {e}"
 
 
-def _vlm_query(ctx: ToolContext, prompt: str, image_url: str = "", image_base64: str = "", image_mime: str = "image/png", model: str = "") -> str:
+def _vlm_query(
+    ctx: ToolContext,
+    prompt: str,
+    path: str = "",
+    source: str = "drive",
+    image_url: str = "",
+    image_base64: str = "",
+    image_mime: str = "image/png",
+    model: str = "",
+) -> str:
     """
-    Analyze any image using a Vision LLM. Provide either image_url or image_base64.
+    Analyze any image using a Vision LLM. Provide path, image_url, or image_base64.
     """
-    if not image_url and not image_base64:
-        return "⚠️ Provide either image_url or image_base64."
+    if not path and not image_url and not image_base64:
+        return "⚠️ Provide path, image_url, or image_base64."
 
     images: List[Dict[str, Any]] = []
-    if image_url:
+    if path:
+        try:
+            images.append(_image_payload_from_path(ctx, path, source=source))
+        except Exception as e:
+            return f"⚠️ {e}"
+    elif image_url:
         images.append({"url": image_url})
     else:
         images.append({"base64": image_base64, "mime": image_mime})
@@ -344,8 +400,9 @@ def get_tools() -> List[ToolEntry]:
                 "name": "vlm_query",
                 "description": (
                     "Analyze any image using a Vision LLM. "
-                    "Provide either image_url (public URL) or image_base64 (base64-encoded PNG/JPEG). "
-                    "Use for: analyzing charts, reading diagrams, understanding screenshots, checking UI."
+                    "Provide path (saved image in Drive), image_url (public URL), or image_base64 "
+                    "(base64-encoded PNG/JPEG). Use for: OCR over photos, analyzing charts, reading "
+                    "diagrams, understanding screenshots, checking UI."
                 ),
                 "parameters": {
                     "type": "object",
@@ -353,6 +410,16 @@ def get_tools() -> List[ToolEntry]:
                         "prompt": {
                             "type": "string",
                             "description": "What to analyze or describe about the image",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Image path relative to the selected source root. Prefer this for Telegram-uploaded images saved in Drive.",
+                        },
+                        "source": {
+                            "type": "string",
+                            "enum": ["drive", "repo"],
+                            "default": "drive",
+                            "description": "Read path from user Drive workspace by default. Repo source is admin-only.",
                         },
                         "image_url": {
                             "type": "string",

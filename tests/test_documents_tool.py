@@ -41,6 +41,39 @@ def test_analyze_document_reads_text_from_drive(tmp_path):
     assert "Summarize the document" in result
 
 
+def test_analyze_document_ocr_reads_image_from_drive(tmp_path, monkeypatch):
+    drive = tmp_path / "drive"
+    repo = tmp_path / "repo"
+    drive.mkdir()
+    image_bytes = b"\xff\xd8financial forecast photo"
+    (drive / "forecast.jpg").write_bytes(image_bytes)
+    captured = {}
+
+    class FakeClient:
+        def vision_query(self, **kwargs):
+            captured.update(kwargs)
+            return ("| Metric | 2026 |\n| Revenue | 100 |", {"prompt_tokens": 10, "completion_tokens": 5})
+
+    monkeypatch.setattr("ouroboros.tools.documents._get_llm_client", lambda: FakeClient())
+    monkeypatch.setattr("ouroboros.tools.documents._get_image_ocr_model", lambda: "vision-test")
+
+    result = _analyze_document(
+        _ctx(repo, drive),
+        path="forecast.jpg",
+        analysis_type="answer_question",
+        question="Проверь прогноз",
+    )
+
+    assert "type: jpg" in result
+    assert "extractor: vlm_ocr" in result
+    assert "mime_type: image/jpeg" in result
+    assert "Image OCR" in result
+    assert "Revenue | 100" in result
+    assert "Answer this question using only the extracted document content: Проверь прогноз" in result
+    assert captured["model"] == "vision-test"
+    assert captured["images"][0]["mime"] == "image/jpeg"
+
+
 def test_analyze_document_extracts_pptx_slides_and_notes(tmp_path):
     drive = tmp_path / "drive"
     repo = tmp_path / "repo"

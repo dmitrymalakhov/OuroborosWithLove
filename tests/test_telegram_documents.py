@@ -157,6 +157,8 @@ def test_format_image_task_text_can_avoid_caption_duplication():
 
     assert text.startswith("Please inspect the attached image.")
     assert "убери фон" not in text
+    assert "analyze_document" in text
+    assert "vlm_query" in text
     assert "edit_image" in text
     assert "uploads/2026-06-03/1_photo.jpg" in text
 

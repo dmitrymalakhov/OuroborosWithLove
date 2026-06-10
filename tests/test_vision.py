@@ -195,6 +195,35 @@ class TestVlmQueryTool(unittest.TestCase):
         images = call_kwargs[1].get("images") or call_kwargs[0][1]
         self.assertEqual(images[0]["url"], "https://example.com/logo.png")
 
+    def test_vlm_query_with_drive_path(self):
+        """vlm_query can read a saved image from the Drive workspace."""
+        from ouroboros.tools.registry import ToolContext
+        from ouroboros.tools.vision import _vlm_query
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = pathlib.Path(tmp.name)
+        repo = root / "repo"
+        drive = root / "drive"
+        repo.mkdir()
+        (drive / "uploads").mkdir(parents=True)
+        image_bytes = b"\xff\xd8jpeg bytes"
+        (drive / "uploads" / "statement.jpg").write_bytes(image_bytes)
+        ctx = ToolContext(repo_dir=repo, drive_root=drive, user_role="user")
+
+        with patch("ouroboros.tools.vision._get_llm_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.vision_query.return_value = ("Extracted table.", {})
+            mock_get_client.return_value = mock_client
+
+            result = _vlm_query(ctx, prompt="Extract the table.", path="uploads/statement.jpg")
+
+        self.assertEqual(result, "Extracted table.")
+        call_kwargs = mock_client.vision_query.call_args
+        images = call_kwargs[1].get("images") or call_kwargs[0][1]
+        self.assertEqual(images[0]["mime"], "image/jpeg")
+        self.assertEqual(base64.b64decode(images[0]["base64"]), image_bytes)
+
     def test_vlm_query_tool_registered(self):
         """vlm_query and analyze_screenshot tools are properly registered."""
         import pathlib

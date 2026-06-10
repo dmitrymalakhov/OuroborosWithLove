@@ -6,7 +6,7 @@ summarize, critique, answer questions, or turn them into tasks.
 
 from __future__ import annotations
 
-import datetime, hashlib, ipaddress, json, re, socket, subprocess, tempfile, urllib.parse, zipfile
+import base64, datetime, hashlib, ipaddress, json, mimetypes, os, re, socket, subprocess, tempfile, urllib.parse, zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Tuple
@@ -48,9 +48,22 @@ TEXT_EXTENSIONS = {
     ".xml", ".html", ".htm", ".log", ".py", ".js", ".ts", ".css",
 }
 
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"}
 ANALYSIS_TYPES = {"summary", "critique", "extract_tasks", "answer_question", "raw"}
 ARCHIVE_EXTENSIONS = {".zip"}
-DOCUMENT_EXTENSIONS = {".pdf", ".pptx", ".docx", ".ppt", ".xlsx"} | TEXT_EXTENSIONS | ARCHIVE_EXTENSIONS
+DOCUMENT_EXTENSIONS = {".pdf", ".pptx", ".docx", ".ppt", ".xlsx"} | TEXT_EXTENSIONS | IMAGE_EXTENSIONS | ARCHIVE_EXTENSIONS
+
+IMAGE_OCR_PROMPT = """Extract the visible content from this user-uploaded image for document analysis.
+
+Focus on OCR accuracy, not interpretation:
+- preserve all visible text, labels, dates, currencies, percentages, totals, formulas, and footnotes;
+- preserve tables as Markdown tables when possible, keeping row/column labels and units;
+- keep numbers exactly as shown, including signs, separators, decimal commas/dots, and empty cells;
+- mark uncertain values as [unclear] and do not invent missing values;
+- if this is a financial statement, forecast, balance sheet, P&L, or cash flow model screenshot/photo, extract enough structure for numerical cross-checks.
+
+Return only the extracted content."""
 
 SEARCH_STOPWORDS = {
     "and", "are", "for", "from", "has", "have", "the", "this", "that", "what", "where", "with",
@@ -388,6 +401,79 @@ def _read_plain_text(path: Path) -> ExtractedDocument:
         kind="text",
         metadata={"encoding": "utf-8"},
         sections=[("Text", text)],
+    )
+
+
+def _detect_image_mime(path: Path) -> str:
+    detected = mimetypes.guess_type(path.name)[0] or ""
+    if detected == "image/jpg":
+        return "image/jpeg"
+    return detected
+
+
+def _get_image_ocr_model() -> str:
+    from ouroboros.llm import default_main_model
+
+    return os.environ.get("OUROBOROS_MODEL", "") or default_main_model()
+
+
+def _get_llm_client():
+    from ouroboros.llm import LLMClient
+
+    return LLMClient()
+
+
+def _emit_llm_usage(ctx: ToolContext | None, usage: Dict[str, Any], model: str) -> None:
+    if ctx is None or ctx.event_queue is None:
+        return
+    try:
+        ctx.event_queue.put_nowait({
+            "type": "llm_usage",
+            "model": model,
+            "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+            "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+            "cached_tokens": int(usage.get("cached_tokens", 0) or 0),
+            "cost": float(usage.get("cost", 0.0) or 0.0),
+            "task_id": ctx.task_id,
+            "task_type": ctx.current_task_type or "task",
+        })
+    except Exception:
+        pass
+
+
+def _extract_image(path: Path, progress: ProgressFn | None = None, ctx: ToolContext | None = None) -> ExtractedDocument:
+    image_mime = _detect_image_mime(path)
+    suffix = path.suffix.lower()
+    if image_mime not in IMAGE_MIME_TYPES or suffix not in IMAGE_EXTENSIONS:
+        return ExtractedDocument(
+            kind=suffix.lstrip(".") or "image",
+            metadata={"extractor": "vlm_ocr", "mime_type": image_mime or "unknown"},
+            warnings=["Unsupported image type. Supported: PNG, JPEG, WEBP, GIF, BMP."],
+        )
+
+    _emit_progress(progress, f"Открыл изображение `{path.name}`. Запускаю OCR через vision-модель.")
+    model = _get_image_ocr_model()
+    try:
+        image_b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        text, usage = _get_llm_client().vision_query(
+            prompt=IMAGE_OCR_PROMPT,
+            images=[{"base64": image_b64, "mime": image_mime}],
+            model=model,
+            max_tokens=4096,
+            reasoning_effort="low",
+        )
+        _emit_llm_usage(ctx, usage, model)
+    except Exception as exc:
+        return ExtractedDocument(
+            kind=suffix.lstrip(".") or "image",
+            metadata={"extractor": "vlm_ocr", "mime_type": image_mime, "model": model},
+            warnings=[f"Image OCR failed: {type(exc).__name__}: {exc}"],
+        )
+
+    return ExtractedDocument(
+        kind=suffix.lstrip(".") or "image",
+        metadata={"extractor": "vlm_ocr", "mime_type": image_mime, "model": model},
+        sections=[("Image OCR", text or "[No text extracted]")],
     )
 
 
@@ -2138,6 +2224,7 @@ def _extract_zip(
     page_ranges: str = "",
     slide_ranges: str = "",
     progress: ProgressFn | None = None,
+    ctx: ToolContext | None = None,
 ) -> ExtractedDocument:
     warnings: List[str] = []
     sections: List[Tuple[str, str]] = []
@@ -2220,6 +2307,7 @@ def _extract_zip(
                     page_ranges=page_ranges,
                     slide_ranges=slide_ranges,
                     progress=progress,
+                    ctx=ctx,
                 )
                 analyzed += 1
                 for warning in extracted.warnings:
@@ -2258,10 +2346,13 @@ def _extract_document(
     page_ranges: str = "",
     slide_ranges: str = "",
     progress: ProgressFn | None = None,
+    ctx: ToolContext | None = None,
 ) -> ExtractedDocument:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
         return _extract_pdf(path, max_pages, page_ranges=page_ranges, progress=progress)
+    if suffix in IMAGE_EXTENSIONS:
+        return _extract_image(path, progress=progress, ctx=ctx)
     if suffix == ".pptx":
         return _extract_pptx(path, max_slides, slide_ranges=slide_ranges, progress=progress)
     if suffix == ".docx":
@@ -2277,6 +2368,7 @@ def _extract_document(
             page_ranges=page_ranges,
             slide_ranges=slide_ranges,
             progress=progress,
+            ctx=ctx,
         )
     if suffix in TEXT_EXTENSIONS:
         _emit_progress(progress, f"Открыл текстовый файл `{path.name}`. Читаю содержимое.")
@@ -2289,7 +2381,7 @@ def _extract_document(
     return ExtractedDocument(
         kind=suffix.lstrip(".") or "unknown",
         warnings=[
-            "Unsupported document type. Supported: PDF, ZIP, PPTX, DOCX, XLSX, TXT, MD, CSV, JSON, HTML, XML, code files.",
+            "Unsupported document type. Supported: PDF, ZIP, PPTX, DOCX, XLSX, images (PNG/JPEG/WEBP/GIF/BMP), TXT, MD, CSV, JSON, HTML, XML, code files.",
         ],
     )
 
@@ -2715,6 +2807,7 @@ def _analyze_document(
         page_ranges=page_ranges,
         slide_ranges=slide_ranges,
         progress=ctx.emit_progress_fn,
+        ctx=ctx,
     )
     _emit_progress(ctx.emit_progress_fn, f"Извлечение текста из `{document_path.name}` завершено. Собираю ответ по твоему запросу.")
     return _format_result(document_path, source, extracted, analysis_type, question or "", max_chars)
@@ -2855,9 +2948,10 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("analyze_document", {
             "name": "analyze_document",
             "description": (
-                "Extract text and structure from PDF, ZIP, PPTX, DOCX, and text-like files for analysis. "
+                "Extract text and structure from PDF, ZIP, PPTX, DOCX, images, and text-like files for analysis. "
                 "Use it before summarizing documents, critiquing presentations, answering questions "
-                "about uploaded files, or extracting action items. For long PDFs, it returns a navigation "
+                "about uploaded files, OCR-reading photos/screenshots of tables, or extracting action items. "
+                "For long PDFs, it returns a navigation "
                 "map from bookmarks or a table of contents when available; use page_ranges to read specific "
                 "later sections. For large PPTX decks, use slide_ranges after search_document finds relevant slides. "
                 "Default source is the user's Drive workspace."

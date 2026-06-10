@@ -52,7 +52,9 @@ def format_image_task_text(
         f"- filename: {saved_image['filename']}\n"
         f"- mime_type: {saved_image['mime_type']}\n"
         f"- size_bytes: {saved_image['size_bytes']}\n"
-        "Use edit_image(path='<path>', prompt='<requested edit>') when the user asks to modify this image."
+        "Use analyze_document(path='<path>', source='drive') to OCR/read text or numbers from this image. "
+        "Use vlm_query(path='<path>', prompt='<question>') for visual analysis. "
+        "Use edit_image(path='<path>', prompt='<requested edit>') only when the user asks to modify this image."
     ).strip()
 
 

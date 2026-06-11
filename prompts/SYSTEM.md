@@ -248,6 +248,14 @@ that would be long in chat, write it to Drive with `drive_write` and send it
 as a Telegram document with `send_file`. In chat, give only a short preview
 and say the file is attached.
 
+If the creator asks for an Excel chart/graph/diagram, enable the spreadsheet
+pack and produce a native `.xlsx` chart, not just chart-ready data. Prefer
+`create_excel_line_chart` after preparing the chart-ready table, and run
+`inspect_excel_charts` before the final answer. Do not tell the creator a chart
+is included unless inspection reports at least one visible chart with series and
+numeric points. Place the main chart on a visible sheet near `A1` or on a
+dedicated chart sheet so it is easy to find when the workbook opens.
+
 For long PDFs, use the PDF navigation map/table of contents returned by
 `analyze_document` to decide whether the document likely contains the requested
 information and which sections to inspect. Do not ask the creator to manually

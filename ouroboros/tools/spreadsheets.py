@@ -22,12 +22,19 @@ MAX_SCAN_COLS = 80
 MAX_INSPECT_FORMULAS = 200
 MAX_INPUT_CANDIDATES = 250
 MIN_WRITE_CONFIDENCE = 0.75
+MAX_CHART_SERIES = 12
+MAX_CHART_POINTS = 1000
 
 _CELL_RE = re.compile(r"^\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6}$", re.IGNORECASE)
 _FORMULA_REF_RE = re.compile(
     r"(?:(?:'((?:[^']|'')+)'|([A-Za-z_][A-Za-z0-9_ .]*))!)?"
     r"(\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6})"
     r"(?::(\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6}))?",
+    re.IGNORECASE,
+)
+_RANGE_RE = re.compile(
+    r"^(?:(?:'((?:[^']|'')+)'|([^!]+))!)?(\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6}"
+    r"(?::\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6})?)$",
     re.IGNORECASE,
 )
 
@@ -86,7 +93,13 @@ def _resolve_xlsx_path(ctx: ToolContext, path: str, source: str = "drive") -> Tu
     return resolved, root
 
 
-def _safe_output_path(root: pathlib.Path, output_path: str, template_name: str, overwrite: bool) -> Tuple[pathlib.Path, str]:
+def _safe_output_path(
+    root: pathlib.Path,
+    output_path: str,
+    template_name: str,
+    overwrite: bool,
+    suffix_label: str = "filled",
+) -> Tuple[pathlib.Path, str]:
     if output_path:
         rel = safe_relpath(output_path)
         if pathlib.PurePosixPath(rel).suffix.lower() != ".xlsx":
@@ -94,7 +107,8 @@ def _safe_output_path(root: pathlib.Path, output_path: str, template_name: str, 
     else:
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
         stem = _safe_stem(pathlib.Path(template_name).stem)
-        rel = str(pathlib.PurePosixPath("spreadsheets") / f"{stem}-filled-{stamp}.xlsx")
+        suffix_label = _safe_stem(suffix_label) or "filled"
+        rel = str(pathlib.PurePosixPath("spreadsheets") / f"{stem}-{suffix_label}-{stamp}.xlsx")
 
     path = (root / rel).resolve()
     try:
@@ -113,6 +127,24 @@ def _safe_output_path(root: pathlib.Path, output_path: str, template_name: str, 
             path = (root / rel).resolve()
             counter += 1
     return path, rel
+
+
+def _safe_sheet_title(value: str, fallback: str = "Chart") -> str:
+    value = re.sub(r"[\[\]:*?/\\]+", "-", str(value or fallback)).strip()
+    value = value.strip("'")[:31]
+    return value or fallback
+
+
+def _unique_sheet_title(wb: Any, desired: str) -> str:
+    base = _safe_sheet_title(desired)
+    if base not in wb.sheetnames:
+        return base
+    for idx in range(2, 100):
+        suffix = f" {idx}"
+        candidate = f"{base[:31 - len(suffix)]}{suffix}"
+        if candidate not in wb.sheetnames:
+            return candidate
+    raise ValueError("Could not create a unique chart sheet name")
 
 
 def _safe_stem(value: str) -> str:
@@ -143,6 +175,34 @@ def _display_value(value: Any) -> str:
 
 def _normalize_coordinate(value: str) -> str:
     return str(value or "").replace("$", "").upper()
+
+
+def _split_range_ref(default_sheet: str, ref: str) -> Tuple[str, str]:
+    raw = str(ref or "").strip()
+    if raw.startswith("="):
+        raw = raw[1:]
+    raw = raw.replace("$", "")
+    match = _RANGE_RE.match(raw)
+    if not match:
+        raise ValueError(f"Invalid range reference: {ref!r}")
+    sheet = match.group(1) or match.group(2) or default_sheet
+    sheet = str(sheet or "").strip().strip("'").replace("''", "'")
+    target = _normalize_coordinate(match.group(3))
+    if not sheet:
+        raise ValueError(f"Range reference must include a sheet or data_sheet: {ref!r}")
+    return sheet, target
+
+
+def _range_dimensions(target: str, range_boundaries: Any) -> Tuple[int, int, int]:
+    min_col, min_row, max_col, max_row = range_boundaries(target)
+    rows = max_row - min_row + 1
+    cols = max_col - min_col + 1
+    cells = rows * cols
+    return rows, cols, cells
+
+
+def _quote_sheet_for_formula(sheet: str) -> str:
+    return "'" + str(sheet).replace("'", "''") + "'"
 
 
 def _strip_formula_string_literals(formula: str) -> str:
@@ -474,6 +534,170 @@ def _set_recalc_on_open(wb: Any) -> None:
             pass
 
 
+def _chart_anchor_cell(chart: Any) -> str:
+    try:
+        from openpyxl.utils import get_column_letter
+
+        marker = getattr(getattr(chart, "anchor", None), "_from", None)
+        if marker is not None:
+            return f"{get_column_letter(int(marker.col) + 1)}{int(marker.row) + 1}"
+    except Exception:
+        pass
+    anchor = getattr(chart, "anchor", "")
+    return str(anchor or "")
+
+
+def _chart_title_text(chart: Any) -> str:
+    title = getattr(chart, "title", None)
+    if title is None:
+        return ""
+    try:
+        paragraphs = getattr(getattr(getattr(title, "tx", None), "rich", None), "p", []) or []
+        parts: List[str] = []
+        for paragraph in paragraphs:
+            for run in getattr(paragraph, "r", []) or []:
+                text = getattr(run, "t", "")
+                if text:
+                    parts.append(str(text))
+        if parts:
+            return "".join(parts)
+    except Exception:
+        pass
+    return str(title)
+
+
+def _chart_series_title(series: Any) -> str:
+    tx = getattr(series, "tx", None)
+    if tx is None:
+        return ""
+    try:
+        if getattr(tx, "v", None):
+            return str(tx.v)
+        str_ref = getattr(tx, "strRef", None)
+        if str_ref is not None and getattr(str_ref, "f", None):
+            return str(str_ref.f)
+        if getattr(tx, "rich", None):
+            return str(tx.rich)
+    except Exception:
+        pass
+    return ""
+
+
+def _chart_ref_formula(obj: Any, *attrs: str) -> str:
+    current = obj
+    for attr in attrs:
+        current = getattr(current, attr, None)
+        if current is None:
+            return ""
+    return str(getattr(current, "f", "") or "")
+
+
+def _series_value_ref(series: Any) -> str:
+    return _chart_ref_formula(series, "val", "numRef")
+
+
+def _series_category_ref(series: Any) -> str:
+    return (
+        _chart_ref_formula(series, "cat", "strRef")
+        or _chart_ref_formula(series, "cat", "numRef")
+        or _chart_ref_formula(series, "cat", "multiLvlStrRef")
+    )
+
+
+def _count_ref_values(wb: Any, default_sheet: str, ref: str, range_boundaries: Any) -> Dict[str, int]:
+    try:
+        sheet_name, target = _split_range_ref(default_sheet, ref)
+        if sheet_name not in wb.sheetnames:
+            return {"cells": 0, "nonblank": 0, "numeric": 0}
+        min_col, min_row, max_col, max_row = range_boundaries(target)
+    except Exception:
+        return {"cells": 0, "nonblank": 0, "numeric": 0}
+
+    ws = wb[sheet_name]
+    cells = nonblank = numeric = 0
+    for row in ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col):
+        for cell in row:
+            cells += 1
+            value = cell.value
+            if value in (None, ""):
+                continue
+            nonblank += 1
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                numeric += 1
+    return {"cells": cells, "nonblank": nonblank, "numeric": numeric}
+
+
+def _chart_summaries(wb: Any, values_wb: Any, range_boundaries: Any) -> List[Dict[str, Any]]:
+    summaries: List[Dict[str, Any]] = []
+    for ws in wb.worksheets:
+        for idx, chart in enumerate(getattr(ws, "_charts", []) or [], start=1):
+            anchor = _chart_anchor_cell(chart)
+            series_summaries: List[Dict[str, Any]] = []
+            for series in list(getattr(chart, "series", []) or [])[:MAX_CHART_SERIES]:
+                value_ref = _series_value_ref(series)
+                category_ref = _series_category_ref(series)
+                counts = _count_ref_values(values_wb, ws.title, value_ref, range_boundaries)
+                series_summaries.append(
+                    {
+                        "title": _chart_series_title(series),
+                        "values": value_ref,
+                        "categories": category_ref,
+                        **counts,
+                    }
+                )
+
+            warnings: List[str] = []
+            if ws.sheet_state != "visible":
+                warnings.append("sheet_hidden")
+            if not series_summaries:
+                warnings.append("no_series")
+            if any(item.get("numeric", 0) == 0 for item in series_summaries):
+                warnings.append("series_without_numeric_values")
+            try:
+                from openpyxl.utils.cell import coordinate_to_tuple
+
+                row, col = coordinate_to_tuple(anchor)
+                if col > int(ws.max_column or 1) + 1 or row > int(ws.max_row or 1) + 5:
+                    warnings.append("anchor_outside_used_cell_range")
+            except Exception:
+                pass
+
+            summaries.append(
+                {
+                    "sheet": ws.title,
+                    "index": idx,
+                    "type": type(chart).__name__,
+                    "title": _chart_title_text(chart),
+                    "anchor": anchor,
+                    "series_count": len(getattr(chart, "series", []) or []),
+                    "series": series_summaries,
+                    "warnings": warnings,
+                }
+            )
+    return summaries
+
+
+def _format_chart_summaries(summaries: List[Dict[str, Any]]) -> List[str]:
+    if not summaries:
+        return ["- charts: 0", "- status: no native Excel charts found"]
+
+    lines = [f"- charts: {len(summaries)}"]
+    for item in summaries:
+        warnings = ",".join(item["warnings"]) if item["warnings"] else "-"
+        title = item["title"] or "-"
+        lines.append(
+            f"- {item['sheet']}!{item['anchor']} | type={item['type']} | title={title} | "
+            f"series_count={item['series_count']} | warnings={warnings}"
+        )
+        for series in item["series"]:
+            series_title = series["title"] or "-"
+            lines.append(
+                f"  - series={series_title} | values={series['values'] or '-'} | "
+                f"categories={series['categories'] or '-'} | numeric_points={series['numeric']}/{series['cells']}"
+            )
+    return lines
+
+
 def _merged_anchor(ws: Any, coordinate: str) -> str:
     for merged_range in ws.merged_cells.ranges:
         if coordinate in merged_range:
@@ -624,6 +848,186 @@ def _fill_excel_template(
     return "\n".join(lines)
 
 
+def _inspect_excel_charts(
+    ctx: ToolContext,
+    path: str,
+    source: str = "drive",
+) -> str:
+    load_workbook, range_boundaries = _require_openpyxl()
+    workbook_path, _root = _resolve_xlsx_path(ctx, path, source)
+
+    ctx.emit_progress_fn(f"Проверяю графики в Excel-файле `{workbook_path.name}`.")
+    wb = load_workbook(workbook_path, data_only=False, keep_links=True, read_only=False)
+    values_wb = load_workbook(workbook_path, data_only=True, keep_links=True, read_only=False)
+    summaries = _chart_summaries(wb, values_wb, range_boundaries)
+
+    lines = [
+        "# Excel Chart Inspection",
+        f"- path: {path}",
+        f"- workbook: {workbook_path.name}",
+        f"- sheets: {len(wb.worksheets)}",
+        "",
+        "## Charts",
+        *_format_chart_summaries(summaries),
+    ]
+    if any(item["warnings"] for item in summaries):
+        lines.extend(
+            [
+                "",
+                "## Guidance",
+                "- For user-facing files, place the main chart on a visible sheet near A1 or on a dedicated chart sheet.",
+                "- Do not tell the user a chart was created until this inspection reports a chart with series and numeric points.",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _create_excel_line_chart(
+    ctx: ToolContext,
+    path: str,
+    data_sheet: str,
+    category_range: str,
+    value_ranges: Any,
+    series_names: Any = None,
+    title: str = "Line chart",
+    output_path: str = "",
+    chart_sheet: str = "Chart",
+    anchor: str = "A3",
+    y_axis_title: str = "",
+    x_axis_title: str = "",
+    percent_axis: bool = False,
+    overwrite: bool = False,
+    send_to_chat: bool = True,
+) -> str:
+    load_workbook, range_boundaries = _require_openpyxl()
+    from openpyxl.chart import LineChart, Reference, Series
+
+    workbook_path, root = _resolve_xlsx_path(ctx, path, "drive")
+    output, rel_output = _safe_output_path(root, output_path, workbook_path.name, bool(overwrite), "chart")
+
+    value_ranges_list = value_ranges
+    if isinstance(value_ranges_list, str):
+        value_ranges_list = [item.strip() for item in value_ranges_list.split(",") if item.strip()]
+    if not isinstance(value_ranges_list, list) or not value_ranges_list:
+        raise ValueError("value_ranges must be a non-empty list of ranges")
+    if len(value_ranges_list) > MAX_CHART_SERIES:
+        raise ValueError(f"value_ranges supports at most {MAX_CHART_SERIES} series")
+
+    names_list = series_names
+    if isinstance(names_list, str):
+        names_list = [item.strip() for item in names_list.split(",")]
+    if names_list is None:
+        names_list = []
+    if not isinstance(names_list, list):
+        raise ValueError("series_names must be a list when supplied")
+
+    ctx.emit_progress_fn(f"Создаю видимый линейный график в Excel-файле `{workbook_path.name}`.")
+    wb = load_workbook(workbook_path, data_only=False, keep_links=True, read_only=False)
+    if data_sheet not in wb.sheetnames:
+        raise ValueError(f"data_sheet not found: {data_sheet}")
+    ws = wb[data_sheet]
+
+    category_sheet, category_target = _split_range_ref(data_sheet, category_range)
+    if category_sheet != data_sheet:
+        raise ValueError("category_range must point to data_sheet in this tool version")
+    category_rows, category_cols, category_cells = _range_dimensions(category_target, range_boundaries)
+    if category_cols != 1:
+        raise ValueError("category_range must be a single column")
+    if category_cells > MAX_CHART_POINTS:
+        raise ValueError(f"category_range is too large; max {MAX_CHART_POINTS} points")
+
+    category_min_col, category_min_row, category_max_col, category_max_row = range_boundaries(category_target)
+    categories = Reference(
+        ws,
+        min_col=category_min_col,
+        min_row=category_min_row,
+        max_col=category_max_col,
+        max_row=category_max_row,
+    )
+
+    chart = LineChart()
+    chart.title = str(title or "Line chart")[:255]
+    chart.style = 13
+    chart.height = 12
+    chart.width = 24
+    chart.legend.position = "r"
+    chart.y_axis.title = str(y_axis_title or "")
+    chart.x_axis.title = str(x_axis_title or "")
+    if percent_axis:
+        chart.y_axis.numFmt = "0%"
+
+    for idx, raw_ref in enumerate(value_ranges_list):
+        value_sheet, value_target = _split_range_ref(data_sheet, str(raw_ref))
+        if value_sheet != data_sheet:
+            raise ValueError("value_ranges must point to data_sheet in this tool version")
+        value_rows, value_cols, value_cells = _range_dimensions(value_target, range_boundaries)
+        if value_cols != 1:
+            raise ValueError(f"value range must be a single column: {raw_ref}")
+        if value_rows != category_rows:
+            raise ValueError(
+                f"value range {raw_ref} has {value_rows} rows but category_range has {category_rows}"
+            )
+        if value_cells > MAX_CHART_POINTS:
+            raise ValueError(f"value range is too large; max {MAX_CHART_POINTS} points: {raw_ref}")
+        min_col, min_row, max_col, max_row = range_boundaries(value_target)
+        values = Reference(ws, min_col=min_col, min_row=min_row, max_col=max_col, max_row=max_row)
+        series_title = str(names_list[idx]) if idx < len(names_list) and names_list[idx] not in (None, "") else ""
+        if not series_title and min_row > 1:
+            header = ws.cell(row=min_row - 1, column=min_col).value
+            series_title = _display_value(header)
+        chart.series.append(Series(values, title=series_title or f"Series {idx + 1}"))
+
+    chart.set_categories(categories)
+
+    target_sheet_name = _safe_sheet_title(chart_sheet or data_sheet)
+    if target_sheet_name in wb.sheetnames:
+        chart_ws = wb[target_sheet_name]
+        chart_ws._charts = []
+    else:
+        chart_ws = wb.create_sheet(_unique_sheet_title(wb, target_sheet_name), 0)
+    chart_ws.sheet_state = "visible"
+    chart_ws["A1"] = str(title or "Line chart")
+    chart_ws["A1"].style = "Title"
+    chart_ws.add_chart(chart, str(anchor or "A3"))
+    chart_ws.freeze_panes = "A3"
+
+    _set_recalc_on_open(wb)
+    wb.save(output)
+
+    queued = False
+    if send_to_chat and ctx.current_chat_id:
+        ctx.pending_events.append(
+            {
+                "type": "send_document",
+                "chat_id": ctx.current_chat_id,
+                "path": rel_output,
+                "caption": "Excel-файл с графиком",
+                "filename": output.name,
+                "mime_type": XLSX_MIME_TYPE,
+                **_scope(ctx),
+            }
+        )
+        queued = True
+
+    verify_wb = load_workbook(output, data_only=False, keep_links=True, read_only=False)
+    values_wb = load_workbook(output, data_only=True, keep_links=True, read_only=False)
+    summaries = _chart_summaries(verify_wb, values_wb, range_boundaries)
+    lines = [
+        "OK: Excel line chart created",
+        f"- source_path: {path}",
+        f"- output_path: {rel_output}",
+        f"- chart_sheet: {chart_ws.title}",
+        f"- data_sheet: {data_sheet}",
+        f"- category_range: {_quote_sheet_for_formula(data_sheet)}!{category_target}",
+        f"- value_ranges: {len(value_ranges_list)}",
+        f"- telegram_delivery: {'queued' if queued else 'skipped'}",
+        "",
+        "## Chart Verification",
+        *_format_chart_summaries(summaries),
+    ]
+    return "\n".join(lines)
+
+
 def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry(
@@ -710,6 +1114,97 @@ def get_tools() -> List[ToolEntry]:
                 },
             },
             _fill_excel_template,
+            timeout_sec=60,
+        ),
+        ToolEntry(
+            "inspect_excel_charts",
+            {
+                "name": "inspect_excel_charts",
+                "description": (
+                    "Inspect native charts embedded in a .xlsx workbook. Use this before telling a user "
+                    "that an Excel chart/diagram was created or when a user says a chart is missing. "
+                    "It reports chart sheet, anchor cell, series count, source ranges, numeric point counts, "
+                    "and visibility warnings such as hidden sheets or anchors outside the used cell range."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to the .xlsx workbook in Drive or repo."},
+                        "source": {
+                            "type": "string",
+                            "enum": ["drive", "repo"],
+                            "default": "drive",
+                            "description": "Where to read the workbook from. repo is admin-only.",
+                        },
+                    },
+                    "required": ["path"],
+                },
+            },
+            _inspect_excel_charts,
+            timeout_sec=60,
+        ),
+        ToolEntry(
+            "create_excel_line_chart",
+            {
+                "name": "create_excel_line_chart",
+                "description": (
+                    "Create a visible native Excel line chart from an existing table in a .xlsx workbook. "
+                    "Use after preparing chart-ready data, especially when the user explicitly asks to "
+                    "build a graph/diagram/chart in Excel. By default it creates or refreshes a visible "
+                    "'Chart' worksheet and anchors the chart near A1, then verifies the resulting workbook."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to the source .xlsx workbook in Drive."},
+                        "data_sheet": {"type": "string", "description": "Worksheet containing the chart-ready data."},
+                        "category_range": {
+                            "type": "string",
+                            "description": "Single-column category labels, e.g. A2:A53 or LFL!A2:A53.",
+                        },
+                        "value_ranges": {
+                            "type": "array",
+                            "description": "One or more single-column numeric ranges with the same row count as category_range.",
+                            "items": {"type": "string"},
+                        },
+                        "series_names": {
+                            "type": "array",
+                            "description": "Optional series labels matching value_ranges.",
+                            "items": {"type": "string"},
+                        },
+                        "title": {"type": "string", "default": "Line chart"},
+                        "output_path": {
+                            "type": "string",
+                            "description": "Optional output .xlsx path in Drive. Defaults to spreadsheets/<name>-chart-<timestamp>.xlsx.",
+                        },
+                        "chart_sheet": {
+                            "type": "string",
+                            "default": "Chart",
+                            "description": "Visible worksheet where the chart will be placed. Existing charts on this sheet are refreshed.",
+                        },
+                        "anchor": {"type": "string", "default": "A3", "description": "Chart anchor cell on chart_sheet."},
+                        "x_axis_title": {"type": "string"},
+                        "y_axis_title": {"type": "string"},
+                        "percent_axis": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Format the y-axis as percentages.",
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Overwrite output_path if it exists; otherwise create a deduplicated filename.",
+                        },
+                        "send_to_chat": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": "Queue the resulting .xlsx for Telegram delivery when there is an active chat.",
+                        },
+                    },
+                    "required": ["path", "data_sheet", "category_range", "value_ranges"],
+                },
+            },
+            _create_excel_line_chart,
             timeout_sec=60,
         ),
     ]

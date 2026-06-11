@@ -10,8 +10,10 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.tools.spreadsheets import (
     XLSX_MIME_TYPE,
+    _create_excel_line_chart,
     _fill_excel_template,
     _formula_dependencies,
+    _inspect_excel_charts,
     _inspect_excel_template,
 )
 
@@ -156,6 +158,67 @@ def test_fill_excel_template_does_not_create_output_when_nothing_written(tmp_pat
     assert ctx.pending_events == []
 
 
+def test_create_excel_line_chart_adds_visible_verified_chart(tmp_path):
+    drive = tmp_path / "drive"
+    repo = tmp_path / "repo"
+    drive.mkdir()
+    path = drive / "lfl.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "LFL"
+    ws.append(["Month", "LFL YoY", "Total YoY"])
+    ws.append(["2026-01", -0.029, -0.029])
+    ws.append(["2026-02", -0.023, -0.023])
+    ws.append(["2026-03", 0.065, 0.065])
+    ws.append(["2026-04", 0.09, 0.09])
+    wb.save(path)
+    ctx = _ctx(repo, drive)
+
+    result = _create_excel_line_chart(
+        ctx,
+        path="lfl.xlsx",
+        data_sheet="LFL",
+        category_range="A2:A5",
+        value_ranges=["B2:B5", "C2:C5"],
+        series_names=["LFL YoY", "Total YoY"],
+        title="Like-for-like YoY",
+        output_path="exports/lfl-chart.xlsx",
+        percent_axis=True,
+    )
+
+    assert "OK: Excel line chart created" in result
+    assert "- chart_sheet: Chart" in result
+    assert "- charts: 1" in result
+    assert "series_count=2" in result
+    assert "numeric_points=4/4" in result
+    assert len(ctx.pending_events) == 1
+    assert ctx.pending_events[0]["path"] == "exports/lfl-chart.xlsx"
+    assert ctx.pending_events[0]["mime_type"] == XLSX_MIME_TYPE
+
+    charted = load_workbook(drive / "exports" / "lfl-chart.xlsx", data_only=False)
+    assert "Chart" in charted.sheetnames
+    assert len(charted["Chart"]._charts) == 1
+    assert charted["Chart"]._charts[0].anchor._from.col == 0
+    assert charted["Chart"]._charts[0].anchor._from.row == 2
+
+    inspection = _inspect_excel_charts(ctx, path="exports/lfl-chart.xlsx")
+    assert "Chart!A3" in inspection
+    assert "series_count=2" in inspection
+    assert "numeric_points=4/4" in inspection
+
+
+def test_inspect_excel_charts_reports_missing_charts(tmp_path):
+    drive = tmp_path / "drive"
+    repo = tmp_path / "repo"
+    drive.mkdir()
+    _write_template(drive / "template.xlsx")
+
+    result = _inspect_excel_charts(_ctx(repo, drive), path="template.xlsx")
+
+    assert "- charts: 0" in result
+    assert "no native Excel charts found" in result
+
+
 def test_formula_dependencies_ignore_cell_like_text_inside_strings():
     refs = _formula_dependencies('=IF(A1>0,"Use B2 text",Sheet2!C3)', "Inputs")
 
@@ -207,4 +270,6 @@ def test_spreadsheets_pack_is_registered(tmp_path):
 
     assert "inspect_excel_template" in tools
     assert "fill_excel_template" in tools
+    assert "inspect_excel_charts" in tools
+    assert "create_excel_line_chart" in tools
     assert "analyze_document" in tools

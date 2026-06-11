@@ -140,6 +140,7 @@ TOOL_PACKS: Dict[str, Set[str]] = {
     },
     "spreadsheets": {
         "inspect_excel_template", "fill_excel_template",
+        "inspect_excel_charts", "create_excel_line_chart",
     },
     "credit": {
         "credit_pack_check", "credit_metrics_check", "credit_deck_challenge",
@@ -177,7 +178,7 @@ TOOL_PACK_DESCRIPTIONS: Dict[str, str] = {
     "orchestration": "Schedule, poll, cancel, and route background tasks.",
     "team": "Approved Telegram team workspace history, inbox, members, and polls.",
     "presentation": "Create PowerPoint decks.",
-    "spreadsheets": "Inspect and fill Excel .xlsx templates while preserving workbook formatting and formulas.",
+    "spreadsheets": "Inspect/fill Excel .xlsx workbooks and create or verify native charts.",
     "credit": "Corporate credit committee preparation, challenge, memo, metrics, and Q&A workflows.",
     "hr": "Hiring playbook workflows: vacancy audit, role profile, screening, interviews, onboarding.",
     "health_review": "Codebase health checks, evolution stats, and multi-model review.",

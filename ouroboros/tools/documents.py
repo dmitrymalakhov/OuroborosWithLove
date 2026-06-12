@@ -53,6 +53,7 @@ IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif", "image
 ANALYSIS_TYPES = {"summary", "critique", "extract_tasks", "answer_question", "raw"}
 ARCHIVE_EXTENSIONS = {".zip"}
 DOCUMENT_EXTENSIONS = {".pdf", ".pptx", ".docx", ".ppt", ".xlsx"} | TEXT_EXTENSIONS | IMAGE_EXTENSIONS | ARCHIVE_EXTENSIONS
+PDF_OCR_RENDER_ZOOM = 2.0
 
 IMAGE_OCR_PROMPT = """Extract the visible content from this user-uploaded image for document analysis.
 
@@ -64,6 +65,10 @@ Focus on OCR accuracy, not interpretation:
 - if this is a financial statement, forecast, balance sheet, P&L, or cash flow model screenshot/photo, extract enough structure for numerical cross-checks.
 
 Return only the extracted content."""
+
+PDF_PAGE_OCR_PROMPT = IMAGE_OCR_PROMPT + """
+
+This image is one rendered page from a scanned PDF. Preserve the page structure, table rows and columns, queue/stage labels, engineering parameters, units, footnotes, and handwritten/printed notes when visible."""
 
 SEARCH_STOPWORDS = {
     "and", "are", "for", "from", "has", "have", "the", "this", "that", "what", "where", "with",
@@ -490,6 +495,31 @@ def _try_import_pdf_reader():
         return PdfReader, "PyPDF2"
     except Exception:
         return None, ""
+
+
+def _try_import_fitz():
+    try:
+        import fitz  # type: ignore
+
+        return fitz
+    except Exception:
+        return None
+
+
+def _pdf_extraction_has_text(extracted: ExtractedDocument) -> bool:
+    if extracted.kind != "pdf":
+        return True
+    for title, text in extracted.sections:
+        if title == "PDF navigation map":
+            continue
+        stripped = str(text or "").strip()
+        if not stripped or stripped == "[No extractable text]":
+            continue
+        if stripped.startswith("[Could not extract page text:"):
+            continue
+        if any(ch.isalnum() for ch in stripped):
+            return True
+    return False
 
 
 def _clean_pdf_toc_title(value: Any) -> str:
@@ -1207,6 +1237,95 @@ def _extract_pdf_with_pdftotext(
         sections=sections,
         warnings=warnings,
     )
+
+
+def _extract_pdf_with_vlm_ocr(
+    path: Path,
+    max_pages: int,
+    page_ranges: str = "",
+    progress: ProgressFn | None = None,
+    ctx: ToolContext | None = None,
+) -> ExtractedDocument | None:
+    fitz = _try_import_fitz()
+    if fitz is None:
+        return None
+
+    warnings: List[str] = ["Text extraction produced no usable text; used VLM OCR over rendered PDF pages."]
+    sections: List[Tuple[str, str]] = []
+    model = _get_image_ocr_model()
+
+    try:
+        doc = fitz.open(str(path))
+    except Exception as exc:
+        return ExtractedDocument(
+            kind="pdf",
+            metadata={"extractor": "vlm_pdf_ocr", "model": model},
+            warnings=[f"Could not open PDF for OCR rendering: {type(exc).__name__}: {exc}"],
+        )
+
+    try:
+        total_pages = len(doc)
+        pages, range_warnings = _parse_page_ranges(page_ranges, total_pages, max_pages)
+        warnings.extend(range_warnings)
+        selection = _format_page_selection(pages)
+        _emit_progress(
+            progress,
+            f"В PDF `{path.name}` не найден текстовый слой. Рендерю страницы {selection} в изображения и запускаю OCR через vision-модель.",
+        )
+
+        try:
+            client = _get_llm_client()
+        except Exception as exc:
+            return ExtractedDocument(
+                kind="pdf",
+                metadata={
+                    "pages": str(total_pages),
+                    "pages_extracted": selection,
+                    "extractor": "vlm_pdf_ocr",
+                    "model": model,
+                },
+                warnings=warnings + [f"PDF OCR failed before rendering pages: {type(exc).__name__}: {exc}"],
+            )
+
+        matrix = fitz.Matrix(PDF_OCR_RENDER_ZOOM, PDF_OCR_RENDER_ZOOM)
+        total_selected = len(pages)
+        for position, page_num in enumerate(pages, start=1):
+            if position == 1 or position == total_selected or position % 5 == 0:
+                _emit_progress(progress, f"OCR PDF `{path.name}`: страница {page_num} ({position}/{total_selected}).")
+            try:
+                page = doc.load_page(page_num - 1)
+                pix = page.get_pixmap(matrix=matrix, alpha=False)
+                image_b64 = base64.b64encode(pix.tobytes("png")).decode("ascii")
+                text, usage = client.vision_query(
+                    prompt=PDF_PAGE_OCR_PROMPT,
+                    images=[{"base64": image_b64, "mime": "image/png"}],
+                    model=model,
+                    max_tokens=4096,
+                    reasoning_effort="low",
+                )
+                _emit_llm_usage(ctx, usage, model)
+                sections.append((f"Page {page_num} OCR", text or "[No text extracted]"))
+            except Exception as exc:
+                warnings.append(f"Page {page_num}: OCR failed: {type(exc).__name__}: {exc}")
+                sections.append((f"Page {page_num} OCR", "[OCR failed]"))
+
+        return ExtractedDocument(
+            kind="pdf",
+            metadata={
+                "pages": str(total_pages),
+                "pages_extracted": selection,
+                "extractor": "vlm_pdf_ocr",
+                "model": model,
+                "render_zoom": str(PDF_OCR_RENDER_ZOOM),
+            },
+            sections=sections,
+            warnings=warnings,
+        )
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
 
 
 def _search_pdf_with_python(
@@ -1939,19 +2058,34 @@ def _extract_pdf(
     max_pages: int,
     page_ranges: str = "",
     progress: ProgressFn | None = None,
+    ctx: ToolContext | None = None,
 ) -> ExtractedDocument:
     extracted = _extract_pdf_with_python(path, max_pages, page_ranges=page_ranges, progress=progress)
     if extracted is not None:
+        if _pdf_extraction_has_text(extracted):
+            return extracted
+        ocr = _extract_pdf_with_vlm_ocr(path, max_pages, page_ranges=page_ranges, progress=progress, ctx=ctx)
+        if ocr is not None:
+            return ocr
         return extracted
 
     extracted = _extract_pdf_with_pdftotext(path, max_pages, page_ranges=page_ranges, progress=progress)
+    if extracted is not None:
+        if _pdf_extraction_has_text(extracted):
+            return extracted
+        ocr = _extract_pdf_with_vlm_ocr(path, max_pages, page_ranges=page_ranges, progress=progress, ctx=ctx)
+        if ocr is not None:
+            return ocr
+        return extracted
+
+    extracted = _extract_pdf_with_vlm_ocr(path, max_pages, page_ranges=page_ranges, progress=progress, ctx=ctx)
     if extracted is not None:
         return extracted
 
     return ExtractedDocument(
         kind="pdf",
         warnings=[
-            "No PDF extractor is available. Install pypdf or pdftotext to analyze PDF files.",
+            "No PDF extractor is available. Install pypdf, pdftotext, or PyMuPDF to analyze PDF files.",
         ],
     )
 
@@ -2350,7 +2484,7 @@ def _extract_document(
 ) -> ExtractedDocument:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        return _extract_pdf(path, max_pages, page_ranges=page_ranges, progress=progress)
+        return _extract_pdf(path, max_pages, page_ranges=page_ranges, progress=progress, ctx=ctx)
     if suffix in IMAGE_EXTENSIONS:
         return _extract_image(path, progress=progress, ctx=ctx)
     if suffix == ".pptx":
@@ -2948,13 +3082,12 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("analyze_document", {
             "name": "analyze_document",
             "description": (
-                "Extract text and structure from PDF, ZIP, PPTX, DOCX, images, and text-like files for analysis. "
+                "Extract text and structure from PDF, scanned PDF via rendered-page VLM OCR, ZIP, PPTX, DOCX, images, and text-like files for analysis. "
                 "Use it before summarizing documents, critiquing presentations, answering questions "
                 "about uploaded files, OCR-reading photos/screenshots of tables, or extracting action items. "
                 "For long PDFs, it returns a navigation "
                 "map from bookmarks or a table of contents when available; use page_ranges to read specific "
-                "later sections. For large PPTX decks, use slide_ranges after search_document finds relevant slides. "
-                "Default source is the user's Drive workspace."
+                "later sections. For large PPTX decks, use slide_ranges after search_document finds relevant slides."
             ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string", "description": "Document path relative to the selected source root."},
@@ -3009,7 +3142,7 @@ def get_tools() -> List[ToolEntry]:
                     "description": "Maximum supported files to analyze inside a ZIP archive.",
                 },
             }, "required": ["path"]},
-        }, _analyze_document, timeout_sec=60),
+        }, _analyze_document, timeout_sec=180),
         ToolEntry("index_document", {
             "name": "index_document",
             "description": (

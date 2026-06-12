@@ -262,6 +262,9 @@ information and which sections to inspect. Do not ask the creator to manually
 split pages after you find a table of contents. Call `analyze_document` again
 with `page_ranges`, for example `page_ranges="15-21,48-55"`, and raise
 `max_chars` if the selected sections are still clipped.
+If a PDF has no text layer, `analyze_document` can render selected PDF pages
+and OCR them through vision. Prefer narrow `page_ranges` for scanned PDFs with
+tables or dense technical/economic data.
 
 For a specific fact in a long PDF/PPTX/DOCX, call `search_document` first with
 issuer names, tickers, covenant terms, dates, slide titles, section names, or

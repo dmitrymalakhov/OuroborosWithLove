@@ -185,6 +185,54 @@ def test_analyze_document_extracts_requested_pdf_page_ranges(tmp_path, monkeypat
     assert "Text from page 2" not in result
 
 
+def test_analyze_document_ocr_reads_scanned_pdf_pages(tmp_path, monkeypatch):
+    import fitz
+
+    drive = tmp_path / "drive"
+    repo = tmp_path / "repo"
+    drive.mkdir()
+    pdf_path = drive / "scanned.pdf"
+    doc = fitz.open()
+    doc.new_page(width=240, height=160)
+    doc.new_page(width=240, height=160)
+    doc.save(pdf_path)
+    doc.close()
+
+    captured = []
+
+    class FakeClient:
+        def vision_query(self, **kwargs):
+            captured.append(kwargs)
+            page_num = len(captured)
+            if page_num == 1:
+                return ("| Очередь | Производительность |\n| I | 12 м3/сут |", {"prompt_tokens": 11, "completion_tokens": 7})
+            return ("| Очередь | Производительность |\n| II | 24 м3/сут |", {"prompt_tokens": 13, "completion_tokens": 8})
+
+    monkeypatch.setattr("ouroboros.tools.documents._get_llm_client", lambda: FakeClient())
+    monkeypatch.setattr("ouroboros.tools.documents._get_image_ocr_model", lambda: "vision-test")
+
+    result = _analyze_document(
+        _ctx(repo, drive),
+        path="scanned.pdf",
+        analysis_type="answer_question",
+        question="Собери параметры по очередям",
+        page_ranges="1-2",
+        max_pages=2,
+    )
+
+    assert "type: pdf" in result
+    assert "extractor: vlm_pdf_ocr" in result
+    assert "pages_extracted: 1-2" in result
+    assert "Page 1 OCR" in result
+    assert "Page 2 OCR" in result
+    assert "I | 12 м3/сут" in result
+    assert "II | 24 м3/сут" in result
+    assert "Text extraction produced no usable text" in result
+    assert len(captured) == 2
+    assert captured[0]["model"] == "vision-test"
+    assert captured[0]["images"][0]["mime"] == "image/png"
+
+
 def test_analyze_document_adds_pdf_outline_navigation_map(tmp_path, monkeypatch):
     class FakePage:
         def __init__(self, number: int):

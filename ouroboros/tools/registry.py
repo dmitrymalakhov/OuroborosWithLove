@@ -248,6 +248,22 @@ SELF_MOD_DISABLED_TOOL_NAMES = {
 }
 
 
+SELF_MODIFICATION_ADMIN_ONLY_NOTICE = (
+    "Самомодификация и доступ к репозиторию доступны только админу Ouroboros."
+)
+
+SELF_MODIFICATION_ADMIN_ONLY_PACKS = {"code_git", "admin_control", "health_review"}
+
+REPOSITORY_SELF_MOD_TOOL_NAMES = (
+    TOOL_PACKS["code_git"]
+    | {
+        "codebase_health", "request_review", "multi_model_review",
+        "generate_evolution_stats", "request_restart", "promote_to_stable",
+        "toggle_evolution", "toggle_consciousness",
+    }
+)
+
+
 ADMIN_ONLY_TOOL_NAMES = {
     # Codebase, shell, git, and deployment surface.
     "repo_read", "repo_list", "repo_write_commit", "repo_commit_push",
@@ -311,13 +327,68 @@ class ToolRegistry:
 
     # --- Contract ---
 
+    def _self_modification_disabled(self) -> bool:
+        return os.environ.get("OUROBOROS_DISABLE_SELF_MODIFICATION", "").strip().lower() in ("1", "true", "yes", "on")
+
+    def _is_admin_context(self) -> bool:
+        return str(getattr(self._ctx, "user_role", "admin") or "user").lower() == "admin"
+
     def _is_tool_allowed(self, name: str) -> bool:
-        if os.environ.get("OUROBOROS_DISABLE_SELF_MODIFICATION", "").strip().lower() in ("1", "true", "yes", "on"):
+        if self._self_modification_disabled():
             if name in SELF_MOD_DISABLED_TOOL_NAMES:
                 return False
-        if str(getattr(self._ctx, "user_role", "admin") or "user").lower() == "admin":
+        if self._is_admin_context():
             return True
         return name not in ADMIN_ONLY_TOOL_NAMES
+
+    def unavailable_tool_message(self, name: str) -> str:
+        """Return a user-facing reason when a known tool exists but is blocked."""
+        entry = self._entries.get(name)
+        if entry is None or self._is_tool_allowed(name):
+            return ""
+        if not self._is_admin_context() and name in ADMIN_ONLY_TOOL_NAMES:
+            if name in REPOSITORY_SELF_MOD_TOOL_NAMES or entry.pack in SELF_MODIFICATION_ADMIN_ONLY_PACKS:
+                return f"⚠️ Tool `{name}` is admin-only. {SELF_MODIFICATION_ADMIN_ONLY_NOTICE}"
+            return f"⚠️ Tool `{name}` is admin-only in multi-user mode."
+        if self._self_modification_disabled() and name in SELF_MOD_DISABLED_TOOL_NAMES:
+            return f"⚠️ Tool `{name}` is disabled because self-modification is disabled by configuration."
+        return f"⚠️ Tool `{name}` is unavailable in this runtime."
+
+    def unavailable_tool_pack_message(self, pack: str) -> str:
+        """Return a user-facing reason when a known pack exists but is blocked."""
+        canonical = normalize_tool_pack(pack)
+        if canonical not in TOOL_PACKS:
+            return ""
+        direct_entries = [e for e in self._entries.values() if e.pack == canonical]
+        if not direct_entries or self.get_tools_by_pack(canonical, include_dependencies=False):
+            return ""
+        direct_tool_names = {e.name for e in direct_entries}
+        if not self._is_admin_context() and direct_tool_names & ADMIN_ONLY_TOOL_NAMES:
+            if canonical in SELF_MODIFICATION_ADMIN_ONLY_PACKS or direct_tool_names & REPOSITORY_SELF_MOD_TOOL_NAMES:
+                return f"⚠️ Pack `{canonical}` is admin-only. {SELF_MODIFICATION_ADMIN_ONLY_NOTICE}"
+            return f"⚠️ Pack `{canonical}` is admin-only in multi-user mode."
+        if self._self_modification_disabled() and direct_tool_names & SELF_MOD_DISABLED_TOOL_NAMES:
+            return f"⚠️ Pack `{canonical}` is disabled because self-modification is disabled by configuration."
+        return ""
+
+    def blocked_tool_packs_notice(self) -> str:
+        """Summarize hidden packs without marking them as available."""
+        blocked = []
+        for pack in TOOL_PACKS:
+            if self.unavailable_tool_pack_message(pack):
+                blocked.append(pack)
+        if not blocked:
+            return ""
+        self_mod_packs = [p for p in blocked if p in SELF_MODIFICATION_ADMIN_ONLY_PACKS]
+        other_packs = [p for p in blocked if p not in SELF_MODIFICATION_ADMIN_ONLY_PACKS]
+        parts = []
+        if self_mod_packs:
+            names = ", ".join(f"`{p}`" for p in self_mod_packs)
+            parts.append(f"⚠️ Admin-only packs hidden for this user: {names}. {SELF_MODIFICATION_ADMIN_ONLY_NOTICE}")
+        if other_packs:
+            names = ", ".join(f"`{p}`" for p in other_packs)
+            parts.append(f"⚠️ Admin-only packs hidden for this user: {names}.")
+        return "\n".join(parts)
 
     def available_tools(self) -> List[str]:
         return [e.name for e in self._entries.values() if self._is_tool_allowed(e.name)]
@@ -409,7 +480,7 @@ class ToolRegistry:
         if entry is None:
             return f"⚠️ Unknown tool: {name}. Available: {', '.join(sorted(self.available_tools()))}"
         if not self._is_tool_allowed(name):
-            return f"⚠️ Tool '{name}' is admin-only in multi-user mode."
+            return self.unavailable_tool_message(name)
         try:
             return entry.handler(self._ctx, **args)
         except TypeError as e:

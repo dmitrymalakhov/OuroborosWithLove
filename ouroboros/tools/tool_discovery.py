@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.tools.registry import ToolContext, ToolEntry, normalize_tool_pack
 
 if TYPE_CHECKING:
     from ouroboros.tools.registry import ToolRegistry
@@ -26,11 +26,12 @@ def set_registry(reg: "ToolRegistry") -> None:
 def _list_available_tools(ctx: ToolContext, **kwargs) -> str:
     if _registry is None:
         return "Tool discovery not available in this context."
+    notice = _registry.blocked_tool_packs_notice()
     grouped: Dict[str, List[Dict[str, str]]] = {}
     for tool in _registry.list_non_core_tools():
         grouped.setdefault(str(tool.get("pack") or "other"), []).append(tool)
     if not grouped:
-        return "No additional tools are available."
+        return "\n\n".join(p for p in ["No additional tools are available.", notice] if p)
     lines = [
         "Additional tools are grouped by pack. Prefer `list_tool_packs` and "
         "`enable_tool_pack`; use `enable_tools` only for exact one-off tools.\n"
@@ -39,6 +40,8 @@ def _list_available_tools(ctx: ToolContext, **kwargs) -> str:
         sample = ", ".join(t["name"] for t in tools[:5])
         suffix = "" if len(tools) <= 5 else f", +{len(tools) - 5} more"
         lines.append(f"- **{pack}** ({len(tools)}): {sample}{suffix}")
+    if notice:
+        lines.extend(["", notice])
     return "\n".join(lines)
 
 
@@ -46,8 +49,9 @@ def _list_tool_packs(ctx: ToolContext, **kwargs) -> str:
     if _registry is None:
         return "Tool pack discovery not available in this context."
     packs = _registry.list_tool_packs()
+    notice = _registry.blocked_tool_packs_notice()
     if not packs:
-        return "No tool packs are available."
+        return "\n\n".join(p for p in ["No tool packs are available.", notice] if p)
     lines = ["**Available tool packs** (use `enable_tool_pack` to activate one):\n"]
     for pack in packs:
         deps = pack.get("dependencies") or []
@@ -56,6 +60,8 @@ def _list_tool_packs(ctx: ToolContext, **kwargs) -> str:
             f"- **{pack['name']}** ({pack['tool_count']} tools{dep_text}): "
             f"{pack['description']}"
         )
+    if notice:
+        lines.extend(["", notice])
     return "\n".join(lines)
 
 
@@ -68,10 +74,14 @@ def _enable_tool_pack(ctx: ToolContext, pack: str = "", **kwargs) -> str:
     parts = []
     known = {p["name"] for p in _registry.list_tool_packs()}
     for name in names:
+        canonical = normalize_tool_pack(name)
         tools = _registry.get_tools_by_pack(name, include_dependencies=True)
-        canonical = next((p for p in known if p == name.strip().lower().replace("-", "_")), name)
+        denial = _registry.unavailable_tool_pack_message(name)
         if tools:
+            canonical = next((p for p in known if p == canonical), canonical)
             parts.append(f"✅ Pack `{canonical}` is registered and callable: {', '.join(tools)}")
+        elif denial:
+            parts.append(denial)
         else:
             parts.append(f"❌ Pack not found or unavailable: {name}")
     return "\n".join(parts)
@@ -85,15 +95,22 @@ def _enable_tools(ctx: ToolContext, tools: str = "", **kwargs) -> str:
         return "No tools specified."
     found = []
     not_found = []
+    denied = []
     for name in names:
         schema = _registry.get_schema_by_name(name)
         if schema:
             found.append(f"{name}: {schema['function'].get('description', '')[:100]}")
         else:
-            not_found.append(name)
+            denial = _registry.unavailable_tool_message(name)
+            if denial:
+                denied.append(denial)
+            else:
+                not_found.append(name)
     parts = []
     if found:
         parts.append("✅ Tools are registered and callable:\n" + "\n".join(f"  - {s}" for s in found))
+    if denied:
+        parts.extend(denied)
     if not_found:
         parts.append(f"❌ Not found: {', '.join(not_found)}")
     return "\n".join(parts)

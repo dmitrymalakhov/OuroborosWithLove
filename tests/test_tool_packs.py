@@ -113,6 +113,48 @@ def test_user_role_pack_filter_hides_admin_packs(tmp_path):
     assert "github" not in packs
 
 
+def test_user_role_list_packs_mentions_admin_only_self_modification(tmp_path):
+    from ouroboros.tool_routing import setup_dynamic_tools
+
+    reg = _registry(tmp_path, role="user")
+    messages = []
+    setup_dynamic_tools(reg, reg.schemas_for_packs([]), messages)
+
+    result = reg.execute("list_tool_packs", {})
+
+    assert "code_git" in result
+    assert "Самомодификация" in result
+    assert "только админу" in result
+
+
+def test_user_role_enable_code_git_reports_admin_only_self_modification(tmp_path):
+    from ouroboros.tool_routing import setup_dynamic_tools
+
+    reg = _registry(tmp_path, role="user")
+    messages = []
+    setup_dynamic_tools(reg, reg.schemas_for_packs([]), messages)
+
+    result = reg.execute("enable_tool_pack", {"pack": "code_git"})
+
+    assert "Pack `code_git` is admin-only" in result
+    assert "Самомодификация" in result
+    assert "not found" not in result.lower()
+
+
+def test_user_role_enable_repo_tool_reports_admin_only_self_modification(tmp_path):
+    from ouroboros.tool_routing import setup_dynamic_tools
+
+    reg = _registry(tmp_path, role="user")
+    messages = []
+    setup_dynamic_tools(reg, reg.schemas_for_packs([]), messages)
+
+    result = reg.execute("enable_tools", {"tools": "repo_read"})
+
+    assert "Tool `repo_read` is admin-only" in result
+    assert "Самомодификация" in result
+    assert "Not found" not in result
+
+
 def test_self_mod_disabled_hides_self_mod_tools_in_packs(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_DISABLE_SELF_MODIFICATION", "1")
     reg = _registry(tmp_path, role="admin")

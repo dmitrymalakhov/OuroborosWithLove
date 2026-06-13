@@ -216,8 +216,9 @@ def setup_dynamic_tools(
 
     def _handle_list_packs(ctx=None, **kwargs):
         packs = tools_registry.list_tool_packs()
+        notice = tools_registry.blocked_tool_packs_notice()
         if not packs:
-            return "No tool packs are available."
+            return "\n\n".join(p for p in ["No tool packs are available.", notice] if p)
         lines = ["**Available tool packs**:\n"]
         for pack in packs:
             name = pack["name"]
@@ -228,6 +229,8 @@ def setup_dynamic_tools(
                 f"- **{name}** ({marker}, {pack['tool_count']} tools{dep_text}): "
                 f"{pack['description']}"
             )
+        if notice:
+            lines.extend(["", notice])
         return "\n".join(lines)
 
     def _handle_enable_pack(ctx=None, pack: str = "", **kwargs):
@@ -236,9 +239,14 @@ def setup_dynamic_tools(
             return "No tool pack specified."
         known = {p["name"] for p in tools_registry.list_tool_packs()}
         enabled, not_found = [], []
+        denied = []
         for name in names:
             if name not in known:
-                not_found.append(name)
+                denial = tools_registry.unavailable_tool_pack_message(name)
+                if denial:
+                    denied.append(denial)
+                else:
+                    not_found.append(name)
                 continue
             added = []
             for schema in tools_registry.schemas_for_packs([name], include_base=False):
@@ -258,18 +266,21 @@ def setup_dynamic_tools(
         parts = []
         if enabled:
             parts.append(f"✅ Enabled packs: {', '.join(enabled)}")
+        if denied:
+            parts.extend(denied)
         if not_found:
             parts.append(f"❌ Packs not found or unavailable: {', '.join(not_found)}")
         return "\n".join(parts) if parts else "No tool pack specified."
 
     def _handle_list_tools(ctx=None, **kwargs):
+        notice = tools_registry.blocked_tool_packs_notice()
         grouped: Dict[str, List[Dict[str, str]]] = {}
         for tool in tools_registry.list_non_core_tools():
             if tool["name"] in active_tool_names:
                 continue
             grouped.setdefault(str(tool.get("pack") or "other"), []).append(tool)
         if not grouped:
-            return "All allowed tools are already active."
+            return "\n\n".join(p for p in ["All allowed tools are already active.", notice] if p)
         lines = [
             "Additional inactive tools are grouped by pack. Prefer `enable_tool_pack`; "
             "use `enable_tools` only for exact one-off tools.\n"
@@ -278,11 +289,13 @@ def setup_dynamic_tools(
             sample = ", ".join(t["name"] for t in tools[:5])
             suffix = "" if len(tools) <= 5 else f", +{len(tools) - 5} more"
             lines.append(f"- **{pack}** ({len(tools)}): {sample}{suffix}")
+        if notice:
+            lines.extend(["", notice])
         return "\n".join(lines)
 
     def _handle_enable_tools(ctx=None, tools: str = "", **kwargs):
         names = [n.strip() for n in tools.split(",") if n.strip()]
-        enabled, not_found = [], []
+        enabled, not_found, denied = [], [], []
         for name in names:
             schema = tools_registry.get_schema_by_name(name)
             if schema and _append_schema(schema):
@@ -298,10 +311,16 @@ def setup_dynamic_tools(
             elif schema and name in active_tool_names:
                 enabled.append(f"{name} (already active)")
             else:
-                not_found.append(name)
+                denial = tools_registry.unavailable_tool_message(name)
+                if denial:
+                    denied.append(denial)
+                else:
+                    not_found.append(name)
         parts = []
         if enabled:
             parts.append(f"✅ Enabled: {', '.join(enabled)}")
+        if denied:
+            parts.extend(denied)
         if not_found:
             parts.append(f"❌ Not found: {', '.join(not_found)}")
         return "\n".join(parts) if parts else "No tools specified."

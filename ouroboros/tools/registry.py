@@ -136,7 +136,8 @@ TOOL_PACKS: Dict[str, Set[str]] = {
         "team_members", "team_poll_create", "team_poll_results", "team_poll_close",
     },
     "presentation": {
-        "create_presentation",
+        "create_presentation", "inspect_presentation_for_edit",
+        "edit_presentation",
     },
     "spreadsheets": {
         "inspect_excel_template", "fill_excel_template",
@@ -177,7 +178,7 @@ TOOL_PACK_DESCRIPTIONS: Dict[str, str] = {
     "memory": "Persistent memory, knowledge topics, identity, and dialogue summaries.",
     "orchestration": "Schedule, poll, cancel, and route background tasks.",
     "team": "Approved Telegram team workspace history, inbox, members, and polls.",
-    "presentation": "Create PowerPoint decks.",
+    "presentation": "Create PowerPoint decks and edit existing PPTX copies without rebuilding them from scratch.",
     "spreadsheets": "Inspect/fill Excel .xlsx workbooks and create or verify native charts.",
     "credit": "Corporate credit committee preparation, challenge, memo, metrics, and Q&A workflows.",
     "hr": "Hiring playbook workflows: vacancy audit, role profile, screening, interviews, onboarding.",
@@ -220,6 +221,12 @@ TOOL_PACK_ALIASES: Dict[str, str] = {
     "photos": "vision",
     "spreadsheet": "spreadsheets",
     "excel": "spreadsheets",
+    "presentation_editing": "presentation",
+    "presentation_editor": "presentation",
+    "presentations": "presentation",
+    "slides": "presentation",
+    "deck": "presentation",
+    "pptx": "presentation",
 }
 
 

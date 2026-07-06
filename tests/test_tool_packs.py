@@ -102,6 +102,15 @@ def test_vision_pack_contains_image_and_screenshot_tools(tmp_path):
     assert "send_photo" in names
 
 
+def test_presentation_pack_contains_generation_and_editing(tmp_path):
+    reg = _registry(tmp_path)
+    names = _schema_names(reg.schemas_for_packs(["pptx"], include_base=False))
+
+    assert "create_presentation" in names
+    assert "inspect_presentation_for_edit" in names
+    assert "edit_presentation" in names
+
+
 def test_user_role_pack_filter_hides_admin_packs(tmp_path):
     reg = _registry(tmp_path, role="user")
     packs = {p["name"]: p for p in reg.list_tool_packs()}

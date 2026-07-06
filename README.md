@@ -91,6 +91,7 @@ ouroboros/                          (agent core)
       word_editing.py               -- DOCX text, paragraph, heading, and table edits
       spreadsheets.py               -- XLSX template inspection and filling
       presentations.py              -- PPTX deck generation from structured slide outlines
+      presentation_editing.py       -- PPTX inspection/editing while preserving source objects
       browser.py                    -- Playwright browser automation
       control.py                    -- restart, background, evolution controls
       review.py                     -- multi-model review via OpenRouter
@@ -218,7 +219,7 @@ Ouroboros exposes its abilities through an auto-discovered tool registry. Tools 
 | PDF editing | `inspect_pdf_for_edit`, `edit_pdf` | Inspect PDF pages and text coordinates, then apply confirmed redactions, text replacements, overlays, comments, and form-field edits to a copy for Telegram delivery. |
 | Word editing | `inspect_word_for_edit`, `edit_word` | Inspect `.docx` text, matches, and tables, then apply confirmed text replacements, paragraph insertions, headings, and table-cell edits to a copy for Telegram delivery. |
 | Spreadsheet templates/charts | `inspect_excel_template`, `fill_excel_template`, `inspect_excel_charts`, `create_excel_line_chart` | Inspect `.xlsx` workbooks as fillable templates, understand sheets, formulas, named ranges, tables, likely input cells, native chart objects, then write confirmed values or create a visible line chart in a formatted copy for Telegram delivery. |
-| Presentation generation | `create_presentation` | Generate PowerPoint `.pptx` decks from LLM-designed slide outlines, save them in the user's workspace, and queue the finished file for Telegram delivery. |
+| Presentation workflows | `create_presentation`, `inspect_presentation_for_edit`, `edit_presentation` | Generate new PowerPoint `.pptx` decks, or inspect and edit an existing presentation copy in place so original tables, schemes, pictures, charts, masters, layouts, theme files, and other package objects are preserved for Telegram delivery. |
 | HR hiring | `hr_vacancy_audit`, `hr_role_profile`, `hr_candidate_screen`, `hr_interview_kit`, `hr_onboarding_checklist` | Use a curated hiring playbook to audit vacancies, build role scorecards, screen candidates against evidence, prepare interviews, and create onboarding/probation checklists. |
 | Credit committee | `credit_pack_check`, `credit_metrics_check`, `credit_deck_challenge`, `credit_speaker_qna`, `credit_committee_readiness`, `credit_memo_draft`, `credit_deck_outline` | Prepare corporate credit committee materials, challenge speaker decks, verify key metrics where evidence exists, generate Q&A, score readiness, draft memo/deck outlines, and flag escalation items. |
 | Telegram uploads | runtime upload pipeline + `analyze_document`/`index_document`/`search_document` + OpenAI Whisper | Telegram document and image attachments are stored in `uploads/YYYY-MM-DD/` inside the sender's workspace, then passed to the agent as a readable path. Voice/audio uploads are transcribed before the agent sees them. ZIP uploads can be analyzed directly or unpacked first, with visible progress updates for long parsing steps. |

@@ -236,7 +236,7 @@ Key tool packs:
 `analyze_screenshot`
 **Code/Git:** `repo_read`, `repo_list`, `claude_code_edit`,
 `repo_write_commit`, `repo_commit_push`, `git_status`, `git_diff`, `run_shell`
-**Domain:** `credit_*`, `hr_*`, `create_presentation`
+**Domain:** `credit_*`, `hr_*`, `create_presentation`, `convert_pptx_to_pdf`
 **Team/Orchestration:** `team_*`, `schedule_task`, `wait_for_task`,
 `get_task_result`, `cancel_task`, `forward_to_worker`
 **Admin/Review:** `request_restart`, `promote_to_stable`, `switch_model`,

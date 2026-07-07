@@ -112,6 +112,9 @@ def _resolve_output_path(ctx: ToolContext, output_path: str, title: str, overwri
     except ValueError:
         raise ValueError("Path traversal is not allowed.")
 
+    if target.exists() and target.is_dir():
+        raise ValueError("output_path points to a directory")
+
     if target.exists() and not overwrite:
         stem = target.stem
         suffix = target.suffix

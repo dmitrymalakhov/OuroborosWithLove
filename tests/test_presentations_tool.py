@@ -1,8 +1,10 @@
 import pathlib
+import subprocess
 import zipfile
 
 from ouroboros.tools.documents import _analyze_document
 from ouroboros.tools.presentation_editing import _edit_presentation, _inspect_presentation_for_edit
+from ouroboros.tools.presentation_exports import PDF_MIME_TYPE, _convert_pptx_to_pdf
 from ouroboros.tools.presentations import PPTX_MIME_TYPE, _create_presentation
 from ouroboros.tools.registry import ToolContext
 
@@ -93,6 +95,69 @@ def test_create_presentation_queues_send_document_event(tmp_path):
     assert event["path"] == "board-update.pptx"
     assert event["filename"] == "board-update.pptx"
     assert event["mime_type"] == PPTX_MIME_TYPE
+
+
+def test_convert_pptx_to_pdf_writes_pdf_and_queues_delivery(tmp_path, monkeypatch):
+    drive = tmp_path / "drive"
+    repo = tmp_path / "repo"
+    progress = []
+    (drive / "presentations").mkdir(parents=True)
+    _write_editable_pptx(drive / "presentations" / "deck.pptx")
+    ctx = _ctx(repo, drive, progress=progress.append)
+
+    calls = {}
+
+    def fake_export(binary, source, out_dir):
+        calls["binary"] = binary
+        calls["source"] = source
+        calls["out_dir"] = out_dir
+        (out_dir / "deck.pdf").write_bytes(b"%PDF-1.4\nfake pdf\n")
+        return subprocess.CompletedProcess([binary], 0, stdout="converted", stderr="")
+
+    monkeypatch.setattr("ouroboros.tools.presentation_exports._find_libreoffice", lambda: "/usr/bin/libreoffice")
+    monkeypatch.setattr("ouroboros.tools.presentation_exports._run_libreoffice_pdf_export", fake_export)
+
+    result = _convert_pptx_to_pdf(
+        ctx,
+        path="presentations/deck.pptx",
+        output_path="exports/deck.pdf",
+        send_to_chat=True,
+    )
+
+    pdf = drive / "exports" / "deck.pdf"
+    assert "OK: presentation converted to PDF" in result
+    assert pdf.read_bytes().startswith(b"%PDF-1.4")
+    assert calls["binary"] == "/usr/bin/libreoffice"
+    assert calls["source"] == drive / "presentations" / "deck.pptx"
+    assert any("Converting presentation" in item for item in progress)
+
+    assert len(ctx.pending_events) == 1
+    event = ctx.pending_events[0]
+    assert event["type"] == "send_document"
+    assert event["path"] == "exports/deck.pdf"
+    assert event["filename"] == "deck.pdf"
+    assert event["mime_type"] == PDF_MIME_TYPE
+
+
+def test_convert_pptx_to_pdf_reports_libreoffice_launch_failure(tmp_path, monkeypatch):
+    drive = tmp_path / "drive"
+    repo = tmp_path / "repo"
+    (drive / "presentations").mkdir(parents=True)
+    _write_editable_pptx(drive / "presentations" / "deck.pptx")
+    ctx = _ctx(repo, drive)
+
+    def fail_export(binary, source, out_dir):
+        raise OSError("cannot execute libreoffice")
+
+    monkeypatch.setattr("ouroboros.tools.presentation_exports._find_libreoffice", lambda: "/bad/libreoffice")
+    monkeypatch.setattr("ouroboros.tools.presentation_exports._run_libreoffice_pdf_export", fail_export)
+
+    result = _convert_pptx_to_pdf(ctx, path="presentations/deck.pptx", output_path="exports/deck.pdf")
+
+    assert "LibreOffice could not be started" in result
+    assert "output_path: not_created" in result
+    assert not (drive / "exports" / "deck.pdf").exists()
+    assert ctx.pending_events == []
 
 
 def _write_editable_pptx(path: pathlib.Path) -> None:

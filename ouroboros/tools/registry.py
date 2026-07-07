@@ -137,7 +137,7 @@ TOOL_PACKS: Dict[str, Set[str]] = {
     },
     "presentation": {
         "create_presentation", "inspect_presentation_for_edit",
-        "edit_presentation",
+        "edit_presentation", "convert_pptx_to_pdf",
     },
     "spreadsheets": {
         "inspect_excel_template", "fill_excel_template",
@@ -178,7 +178,7 @@ TOOL_PACK_DESCRIPTIONS: Dict[str, str] = {
     "memory": "Persistent memory, knowledge topics, identity, and dialogue summaries.",
     "orchestration": "Schedule, poll, cancel, and route background tasks.",
     "team": "Approved Telegram team workspace history, inbox, members, and polls.",
-    "presentation": "Create PowerPoint decks and edit existing PPTX copies without rebuilding them from scratch.",
+    "presentation": "Create PowerPoint decks, edit existing PPTX copies, and export PPTX presentations to PDF.",
     "spreadsheets": "Inspect/fill Excel .xlsx workbooks and create or verify native charts.",
     "credit": "Corporate credit committee preparation, challenge, memo, metrics, and Q&A workflows.",
     "hr": "Hiring playbook workflows: vacancy audit, role profile, screening, interviews, onboarding.",

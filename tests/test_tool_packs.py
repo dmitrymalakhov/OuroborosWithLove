@@ -109,6 +109,7 @@ def test_presentation_pack_contains_generation_and_editing(tmp_path):
     assert "create_presentation" in names
     assert "inspect_presentation_for_edit" in names
     assert "edit_presentation" in names
+    assert "convert_pptx_to_pdf" in names
 
 
 def test_user_role_pack_filter_hides_admin_packs(tmp_path):

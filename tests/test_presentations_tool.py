@@ -188,6 +188,48 @@ def test_create_presentation_embeds_slide_images(tmp_path):
     assert 'Extension="png" ContentType="image/png"' in content_types
 
 
+def test_create_presentation_converts_webp_images_to_png(tmp_path, monkeypatch):
+    drive = tmp_path / "drive"
+    repo = tmp_path / "repo"
+    (drive / "dekart_assets").mkdir(parents=True)
+    (drive / "dekart_assets" / "logo.webp").write_bytes(b"fake-webp")
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADUlEQVR42mP8z8BQDwAFgwJ/lw3fWQAAAABJRU5ErkJggg=="
+    )
+
+    def fake_run(cmd, **kwargs):
+        pathlib.Path(cmd[-1]).write_bytes(png)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("ouroboros.tools.presentation_images.shutil.which", lambda name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr("ouroboros.tools.presentation_images.subprocess.run", fake_run)
+
+    _create_presentation(
+        _ctx(repo, drive),
+        title="ДЕКАРТ",
+        slides=[{
+            "title": "ДЕКАРТ",
+            "body": "Фото должно быть совместимо с PowerPoint",
+            "images": [{"path": "dekart_assets/logo.webp", "alt_text": "Логотип"}],
+        }],
+        output_path="presentations/with-webp.pptx",
+        include_title_slide=False,
+        send_to_chat=False,
+    )
+
+    with zipfile.ZipFile(drive / "presentations" / "with-webp.pptx") as zf:
+        names = set(zf.namelist())
+        content_types = zf.read("[Content_Types].xml").decode("utf-8")
+        rels_xml = zf.read("ppt/slides/_rels/slide1.xml.rels").decode("utf-8")
+        media = zf.read("ppt/media/image1.png")
+
+    assert "ppt/media/image1.png" in names
+    assert all(not name.endswith(".webp") for name in names)
+    assert media == png
+    assert 'Target="../media/image1.png"' in rels_xml
+    assert 'Extension="webp"' not in content_types
+
+
 def test_presentation_image_box_clamps_inside_slide():
     xml = picture(
         2,

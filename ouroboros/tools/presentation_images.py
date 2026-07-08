@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import pathlib
 import re
+import shutil
+import subprocess
+import tempfile
 from typing import Any, Dict, List
 from xml.sax.saxutils import escape
 
@@ -16,10 +19,14 @@ SLIDE_H = 6_858_000
 MAX_IMAGES_PER_SLIDE = 12
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 
-IMAGE_TYPES = {
+PPTX_IMAGE_TYPES = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
+}
+
+SOURCE_IMAGE_TYPES = {
+    **PPTX_IMAGE_TYPES,
     ".gif": "image/gif",
     ".webp": "image/webp",
 }
@@ -28,7 +35,7 @@ IMAGE_TYPES = {
 def image_content_type_defaults() -> str:
     return "".join(
         f'<Default Extension="{suffix.lstrip(".")}" ContentType="{content_type}"/>'
-        for suffix, content_type in IMAGE_TYPES.items()
+        for suffix, content_type in PPTX_IMAGE_TYPES.items()
     )
 
 
@@ -91,6 +98,28 @@ def _image_size(data: bytes, suffix: str) -> tuple[int, int]:
     return 0, 0
 
 
+def _convert_image_to_png(source: pathlib.Path, rel: str) -> bytes:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise ValueError(
+            f"Image format is not safe for PowerPoint: {rel}. "
+            "Install ffmpeg on the server or use PNG/JPEG images."
+        )
+    with tempfile.TemporaryDirectory(prefix="pptx-image-") as tmp_name:
+        output = pathlib.Path(tmp_name) / "image.png"
+        proc = subprocess.run(
+            [ffmpeg, "-y", "-v", "error", "-i", str(source), "-frames:v", "1", str(output)],
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        if proc.returncode != 0 or not output.exists():
+            details = _clean_text((proc.stderr or proc.stdout or "").strip(), 300)
+            raise ValueError(f"Failed to convert image for PowerPoint: {rel}. {details}")
+        return output.read_bytes()
+
+
 def prepare_slide_images(ctx: ToolContext, slides: List[Dict[str, Any]]) -> None:
     media_idx = 1
     root = ctx.drive_root.resolve()
@@ -104,20 +133,26 @@ def prepare_slide_images(ctx: ToolContext, slides: List[Dict[str, Any]]) -> None
             except ValueError:
                 raise ValueError("Image path traversal is not allowed.")
             suffix = source.suffix.lower()
-            if suffix not in IMAGE_TYPES:
+            if suffix not in SOURCE_IMAGE_TYPES:
                 raise ValueError(f"Unsupported image type for PPTX: {rel}. Use PNG, JPEG, GIF, or WEBP.")
             if not source.exists() or not source.is_file():
                 raise FileNotFoundError(f"Image not found: {rel}")
             data = source.read_bytes()
             if len(data) > MAX_IMAGE_BYTES:
                 raise ValueError(f"Image is too large for PPTX: {rel} ({len(data)} bytes)")
-            width, height = _image_size(data, suffix)
+            media_suffix = suffix
+            if suffix not in PPTX_IMAGE_TYPES:
+                data = _convert_image_to_png(source, rel)
+                media_suffix = ".png"
+                if len(data) > MAX_IMAGE_BYTES:
+                    raise ValueError(f"Converted image is too large for PPTX: {rel} ({len(data)} bytes)")
+            width, height = _image_size(data, media_suffix)
             prepared.append({
                 **image,
                 "path": rel,
                 "name": source.name,
                 "data": data,
-                "media_name": f"image{media_idx}{suffix}",
+                "media_name": f"image{media_idx}{media_suffix}",
                 "rel_id": f"rId{rel_idx}",
                 "width_px": width,
                 "height_px": height,

@@ -24,6 +24,8 @@ MAX_BULLETS = 12
 MAX_TEXT_CHARS = 1600
 SLIDE_W = 12_192_000
 SLIDE_H = 6_858_000
+EMU_PER_POINT = 12_700
+MIN_TEXT_SIZE = 1_150
 
 
 THEMES: Dict[str, Dict[str, str]] = {
@@ -233,6 +235,89 @@ def _paragraph(text: str, size: int, color: str, bold: bool = False, bullet: boo
     )
 
 
+def _estimate_wrapped_lines(text: str, size: int, cx: int, bullet: bool = False) -> int:
+    size_pt = max(8.0, size / 100)
+    width_pt = max(20.0, cx / EMU_PER_POINT)
+    chars_per_line = max(8, int(width_pt / (size_pt * 0.54)))
+    if bullet:
+        chars_per_line = max(8, chars_per_line - 3)
+
+    lines = 0
+    for part in str(text or "").splitlines() or [""]:
+        length = max(1, len(part.strip()))
+        lines += max(1, (length + chars_per_line - 1) // chars_per_line)
+    return lines
+
+
+def _estimated_text_height_pt(items: List[Dict[str, Any]], cx: int) -> float:
+    height = 0.0
+    for item in items:
+        size = int(item.get("size", 2200))
+        size_pt = size / 100
+        lines = _estimate_wrapped_lines(item.get("text", ""), size, cx, bool(item.get("bullet", False)))
+        height += lines * size_pt * 1.16
+        height += max(1.5, size_pt * 0.12)
+    return height
+
+
+def _fit_textbox_items(
+    paragraphs: List[Dict[str, Any]],
+    cx: int,
+    cy: int,
+    margin: int,
+    min_size: int = MIN_TEXT_SIZE,
+) -> List[Dict[str, Any]]:
+    items = [dict(item) for item in paragraphs if _clean_text(item.get("text"))]
+    if not items:
+        return []
+
+    usable_cx = max(1, cx - 2 * margin)
+    usable_cy = max(1, cy - 2 * margin)
+    available_pt = max(10.0, usable_cy / EMU_PER_POINT)
+
+    for _ in range(16):
+        if _estimated_text_height_pt(items, usable_cx) <= available_pt:
+            return items
+        changed = False
+        for item in items:
+            size = int(item.get("size", 2200))
+            if size > min_size:
+                item["size"] = max(min_size, int(size * 0.92))
+                changed = True
+        if not changed:
+            break
+
+    fitted: List[Dict[str, Any]] = []
+    omitted = 0
+    for item in items:
+        candidate = fitted + [item]
+        if _estimated_text_height_pt(candidate, usable_cx) <= available_pt:
+            fitted.append(item)
+        else:
+            omitted += 1
+
+    if omitted and fitted:
+        marker = {
+            "text": "...",
+            "size": min_size,
+            "color": fitted[-1].get("color", "000000"),
+            "bullet": bool(fitted[-1].get("bullet", False)),
+        }
+        while fitted and _estimated_text_height_pt(fitted + [marker], usable_cx) > available_pt:
+            fitted.pop()
+        if fitted:
+            fitted.append(marker)
+        else:
+            first = dict(items[0])
+            first["size"] = min(int(first.get("size", min_size)), min_size)
+            if _estimated_text_height_pt([first, marker], usable_cx) <= available_pt:
+                fitted = [first, marker]
+            else:
+                fitted = [marker]
+
+    return fitted or items[:1]
+
+
 def _textbox(
     shape_id: int,
     name: str,
@@ -244,9 +329,11 @@ def _textbox(
     fill: str = "",
     line: str = "",
     margin: int = 80_000,
+    min_size: int = MIN_TEXT_SIZE,
 ) -> str:
     fill_xml = f'<a:solidFill><a:srgbClr val="{fill}"/></a:solidFill>' if fill else "<a:noFill/>"
     line_xml = f'<a:ln><a:solidFill><a:srgbClr val="{line}"/></a:solidFill></a:ln>' if line else "<a:ln><a:noFill/></a:ln>"
+    fitted_paragraphs = _fit_textbox_items(paragraphs, cx, cy, margin, min_size)
     para_xml = "".join(
         _paragraph(
             item.get("text", ""),
@@ -256,8 +343,7 @@ def _textbox(
             bool(item.get("bullet", False)),
             item.get("align", "l"),
         )
-        for item in paragraphs
-        if _clean_text(item.get("text"))
+        for item in fitted_paragraphs
     )
     if not para_xml:
         para_xml = "<a:p/>"
@@ -274,7 +360,8 @@ def _textbox(
         f"{fill_xml}{line_xml}"
         "</p:spPr>"
         "<p:txBody>"
-        f'<a:bodyPr wrap="square" lIns="{margin}" tIns="{margin}" rIns="{margin}" bIns="{margin}"><a:spAutoFit/></a:bodyPr>'
+        f'<a:bodyPr wrap="square" lIns="{margin}" tIns="{margin}" rIns="{margin}" bIns="{margin}">'
+        '<a:normAutofit fontScale="65000" lnSpcReduction="20000"/></a:bodyPr>'
         "<a:lstStyle/>"
         f"{para_xml}"
         "</p:txBody>"

@@ -97,6 +97,46 @@ def test_create_presentation_queues_send_document_event(tmp_path):
     assert event["mime_type"] == PPTX_MIME_TYPE
 
 
+def test_create_presentation_fits_dense_text_inside_slide_boxes(tmp_path):
+    drive = tmp_path / "drive"
+    repo = tmp_path / "repo"
+    dense_items = [
+        "Интерьерные и фасадные краски; структурные покрытия",
+        "Декоративные штукатурки; специальные краски",
+        "Грунты акриловые, по металлу, шпаклевки",
+        "Эмали универсальные, по ржавчине, для пола, термостойкие, аэрозольные",
+        "Составы для дерева: антисептики, лаки, масло, огнебиозащита",
+        "Клеевые составы и сопутствующие материалы для ремонта",
+    ] * 8
+
+    _create_presentation(
+        _ctx(repo, drive),
+        title="ДЕКАРТ",
+        slides=[{
+            "layout": "two_column",
+            "title": "ДЕКАРТ (dekart.ru) — производство и реализация лакокрасочных материалов",
+            "left_title": "Чем занимается",
+            "left_bullets": [
+                "Российский производитель и продавец ЛКМ для строительства и ремонта",
+                "Материалы для внутренних и наружных работ и разных оснований",
+                "Фокус на практических продуктах: краски, грунты, лаки, эмали, штукатурки",
+            ],
+            "right_title": "Что в ассортименте",
+            "right_bullets": dense_items,
+        }],
+        output_path="presentations/dense.pptx",
+        include_title_slide=False,
+        send_to_chat=False,
+    )
+
+    with zipfile.ZipFile(drive / "presentations" / "dense.pptx") as zf:
+        slide_xml = zf.read("ppt/slides/slide1.xml").decode("utf-8")
+
+    assert "<a:spAutoFit/>" not in slide_xml
+    assert "<a:normAutofit" in slide_xml
+    assert 'sz="1150"' in slide_xml
+
+
 def test_convert_pptx_to_pdf_writes_pdf_and_queues_delivery(tmp_path, monkeypatch):
     drive = tmp_path / "drive"
     repo = tmp_path / "repo"

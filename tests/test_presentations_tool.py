@@ -1,3 +1,4 @@
+import base64
 import pathlib
 import subprocess
 import zipfile
@@ -5,6 +6,7 @@ import zipfile
 from ouroboros.tools.documents import _analyze_document
 from ouroboros.tools.presentation_editing import _edit_presentation, _inspect_presentation_for_edit
 from ouroboros.tools.presentation_exports import PDF_MIME_TYPE, _convert_pptx_to_pdf
+from ouroboros.tools.presentation_images import SLIDE_H, SLIDE_W, picture
 from ouroboros.tools.presentations import PPTX_MIME_TYPE, _create_presentation
 from ouroboros.tools.registry import ToolContext
 
@@ -135,6 +137,80 @@ def test_create_presentation_fits_dense_text_inside_slide_boxes(tmp_path):
     assert "<a:spAutoFit/>" not in slide_xml
     assert "<a:normAutofit" in slide_xml
     assert 'sz="1150"' in slide_xml
+
+
+def test_create_presentation_embeds_slide_images(tmp_path):
+    drive = tmp_path / "drive"
+    repo = tmp_path / "repo"
+    (drive / "dekart_assets").mkdir(parents=True)
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADUlEQVR42mP8z8BQDwAFgwJ/lw3fWQAAAABJRU5ErkJggg=="
+    )
+    (drive / "dekart_assets" / "logo.png").write_bytes(png)
+
+    _create_presentation(
+        _ctx(repo, drive),
+        title="ДЕКАРТ",
+        slides=[{
+            "title": "ДЕКАРТ",
+            "body": "Производство и реализация ЛКМ",
+            "images": [{
+                "path": "dekart_assets/logo.png",
+                "alt_text": "Логотип ДЕКАРТ",
+                "x": 0.72,
+                "y": 0.16,
+                "w": 0.2,
+                "h": 0.16,
+            }],
+        }],
+        output_path="presentations/with-image.pptx",
+        include_title_slide=False,
+        send_to_chat=False,
+    )
+
+    with zipfile.ZipFile(drive / "presentations" / "with-image.pptx") as zf:
+        names = set(zf.namelist())
+        slide_xml = zf.read("ppt/slides/slide1.xml").decode("utf-8")
+        rels_xml = zf.read("ppt/slides/_rels/slide1.xml.rels").decode("utf-8")
+        content_types = zf.read("[Content_Types].xml").decode("utf-8")
+        media = zf.read("ppt/media/image1.png")
+
+    assert "ppt/media/image1.png" in names
+    assert media == png
+    assert "<p:pic>" in slide_xml
+    assert 'r:embed="rId2"' in slide_xml
+    assert "Логотип ДЕКАРТ" in slide_xml
+    content_block = slide_xml.split('name="Content"', 1)[1].split("</p:sp>", 1)[0]
+    assert 'cx="7870160"' in content_block
+    assert 'Target="../media/image1.png"' in rels_xml
+    assert 'Extension="png" ContentType="image/png"' in content_types
+
+
+def test_presentation_image_box_clamps_inside_slide():
+    xml = picture(
+        2,
+        {
+            "path": "dekart_assets/logo.png",
+            "name": "logo.png",
+            "rel_id": "rId2",
+            "width_px": 100,
+            "height_px": 50,
+            "x": 1,
+            "y": 1,
+            "w": 0.25,
+            "h": 0.25,
+        },
+        0,
+        1,
+    )
+
+    expected_w = int(SLIDE_W * 0.25)
+    expected_h = int(expected_w / 2)
+    expected_x = SLIDE_W - expected_w
+    expected_y = (SLIDE_H - int(SLIDE_H * 0.25)) + (int(SLIDE_H * 0.25) - expected_h) // 2
+
+    assert f'x="{expected_x}" y="{expected_y}"' in xml
+    assert f'cx="{expected_w}" cy="{expected_h}"' in xml
 
 
 def test_convert_pptx_to_pdf_writes_pdf_and_queues_delivery(tmp_path, monkeypatch):

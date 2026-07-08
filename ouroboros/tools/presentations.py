@@ -14,6 +14,13 @@ import zipfile
 from typing import Any, Dict, List
 from xml.sax.saxutils import escape
 
+from ouroboros.tools.presentation_images import (
+    coerce_images,
+    image_bounds,
+    image_content_type_defaults,
+    picture,
+    prepare_slide_images,
+)
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import safe_relpath
 
@@ -157,6 +164,7 @@ def _coerce_slides(slides: Any) -> List[Dict[str, Any]]:
             "quote": _clean_text(raw.get("quote"), 500),
             "attribution": _clean_text(raw.get("attribution"), 140),
             "speaker_notes": _clean_text(raw.get("speaker_notes"), 1200),
+            "images": coerce_images(raw.get("images")),
         }
         if slide["layout"] == "auto":
             if slide["left_bullets"] or slide["right_bullets"]:
@@ -192,6 +200,7 @@ def _presentation_slides(
             "quote": "",
             "attribution": "",
             "speaker_notes": "",
+            "images": [],
         })
     result.extend(slides)
     if not result:
@@ -208,6 +217,7 @@ def _presentation_slides(
             "quote": "",
             "attribution": "",
             "speaker_notes": "",
+            "images": [],
         })
     return result[:MAX_SLIDES]
 
@@ -396,6 +406,62 @@ def _title_size(text: str) -> int:
     return 4400
 
 
+def _boxes_overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+    ax, ay, acx, acy = a
+    bx, by, bcx, bcy = b
+    return ax < bx + bcx and ax + acx > bx and ay < by + bcy and ay + acy > by
+
+
+def _trim_box_for_right_images(
+    slide: Dict[str, Any],
+    x: int,
+    y: int,
+    cx: int,
+    cy: int,
+    min_cx: int,
+) -> tuple[int, int, int, int]:
+    images = slide.get("_prepared_images") or []
+    right = x + cx
+    own_box = (x, y, cx, cy)
+    for idx, image in enumerate(images):
+        ix, iy, icx, icy = image_bounds(image, idx, len(images))
+        if ix > SLIDE_W * 0.45 and _boxes_overlap(own_box, (ix, iy, icx, icy)):
+            right = min(right, ix - 180_000)
+    if right - x >= min_cx:
+        return x, y, right - x, cy
+    return x, y, cx, cy
+
+
+def _fit_content_box_around_images(
+    slide: Dict[str, Any],
+    x: int,
+    y: int,
+    cx: int,
+    cy: int,
+) -> tuple[int, int, int, int]:
+    images = slide.get("_prepared_images") or []
+    right = x + cx
+    bottom = y + cy
+    own_box = (x, y, cx, cy)
+    for idx, image in enumerate(images):
+        ix, iy, icx, icy = image_bounds(image, idx, len(images))
+        image_box = (ix, iy, icx, icy)
+        if not _boxes_overlap(own_box, image_box):
+            continue
+        if iy + icy / 2 > y + cy * 0.7:
+            bottom = min(bottom, iy - 180_000)
+        elif ix + icx / 2 > x + cx * 0.55:
+            right = min(right, ix - 180_000)
+
+    next_cx = right - x
+    next_cy = bottom - y
+    if next_cx < 3_800_000:
+        next_cx = cx
+    if next_cy < 2_400_000:
+        next_cy = cy
+    return x, y, next_cx, next_cy
+
+
 def _render_slide_shapes(slide: Dict[str, Any], theme: Dict[str, str], slide_no: int, total: int) -> str:
     shapes: List[str] = []
     sid = 2
@@ -442,8 +508,11 @@ def _render_slide_shapes(slide: Dict[str, Any], theme: Dict[str, str], slide_no:
             ))
         return "".join(shapes)
 
+    title_x, title_y, title_cx, title_cy = _trim_box_for_right_images(
+        slide, 650_000, 420_000, 10_950_000, 720_000, 5_200_000
+    )
     shapes.append(_textbox(
-        sid, "Slide title", 650_000, 420_000, 10_950_000, 720_000,
+        sid, "Slide title", title_x, title_y, title_cx, title_cy,
         [{"text": title, "size": 3100, "color": theme["text"], "bold": True}],
         margin=0,
     ))
@@ -491,8 +560,11 @@ def _render_slide_shapes(slide: Dict[str, Any], theme: Dict[str, str], slide_no:
             body_items.append({"text": bullet, "size": 2000, "color": theme["text"], "bullet": True})
         if not body_items:
             body_items.append({"text": slide["subtitle"] or "Add details here.", "size": 2200, "color": theme["muted"]})
+        content_x, content_y, content_cx, content_cy = _fit_content_box_around_images(
+            slide, 850_000, 1_500_000, 10_550_000, 4_700_000
+        )
         shapes.append(_textbox(
-            sid, "Content", 850_000, 1_500_000, 10_550_000, 4_700_000,
+            sid, "Content", content_x, content_y, content_cx, content_cy,
             body_items,
             fill=theme["panel"] if layout == "closing" else "",
             line=theme["line"] if layout == "closing" else "",
@@ -505,6 +577,12 @@ def _render_slide_shapes(slide: Dict[str, Any], theme: Dict[str, str], slide_no:
         [{"text": footer, "size": 1150, "color": theme["muted"], "align": "r"}],
         margin=0,
     ))
+    sid += 1
+
+    images = slide.get("_prepared_images") or []
+    for idx, image in enumerate(images):
+        shapes.append(picture(sid, image, idx, len(images)))
+        sid += 1
     return "".join(shapes)
 
 
@@ -532,13 +610,20 @@ def _slide_xml(slide: Dict[str, Any], theme: Dict[str, str], slide_no: int, tota
     )
 
 
-def _slide_rels_xml() -> str:
+def _slide_rels_xml(images: List[Dict[str, Any]] | None = None) -> str:
+    image_rels = "".join(
+        f'<Relationship Id="{image["rel_id"]}" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
+        f'Target="../media/{image["media_name"]}"/>'
+        for image in images or []
+    )
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
         '<Relationship Id="rId1" '
         'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" '
         'Target="../slideLayouts/slideLayout1.xml"/>'
+        f"{image_rels}"
         "</Relationships>"
     )
 
@@ -554,6 +639,7 @@ def _content_types_xml(slide_count: int) -> str:
         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
         '<Default Extension="xml" ContentType="application/xml"/>'
+        f"{image_content_type_defaults()}"
         '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
         '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>'
         '<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>'
@@ -739,7 +825,10 @@ def _write_pptx(path: pathlib.Path, title: str, slides: List[Dict[str, Any]], th
         zf.writestr("ppt/theme/theme1.xml", _theme_xml(theme))
         for idx, slide in enumerate(slides, start=1):
             zf.writestr(f"ppt/slides/slide{idx}.xml", _slide_xml(slide, theme, idx, len(slides)))
-            zf.writestr(f"ppt/slides/_rels/slide{idx}.xml.rels", _slide_rels_xml())
+            zf.writestr(f"ppt/slides/_rels/slide{idx}.xml.rels", _slide_rels_xml(slide.get("_prepared_images")))
+        for slide in slides:
+            for image in slide.get("_prepared_images") or []:
+                zf.writestr(f"ppt/media/{image['media_name']}", image["data"])
 
 
 def _write_notes(path: pathlib.Path, rel_path: str, title: str, slides: List[Dict[str, Any]]) -> str:
@@ -777,6 +866,7 @@ def _create_presentation(
     output, rel_output = _resolve_output_path(ctx, output_path, title, bool(overwrite))
 
     ctx.emit_progress_fn(f"Creating presentation `{output.name}` with {len(_slides)} slides.")
+    prepare_slide_images(ctx, _slides)
     _write_pptx(output, title, _slides, theme)
     notes_rel = _write_notes(output, rel_output, title, _slides)
 
@@ -843,6 +933,23 @@ def get_tools() -> List[ToolEntry]:
                         "quote": {"type": "string"},
                         "attribution": {"type": "string"},
                         "speaker_notes": {"type": "string"},
+                        "images": {
+                            "type": "array",
+                            "description": (
+                                "Images to embed directly on this slide from Drive paths. "
+                                "Use x/y/w/h as slide fractions from 0 to 1 for precise placement; "
+                                "omit them for an automatic bottom strip."
+                            ),
+                            "items": {"type": "object", "properties": {
+                                "path": {"type": "string", "description": "Image path in Drive, e.g. dekart_assets/logo.png."},
+                                "alt_text": {"type": "string"},
+                                "fit": {"type": "string", "enum": ["contain", "stretch"], "default": "contain"},
+                                "x": {"type": "number", "description": "Left position as fraction of slide width, 0..1."},
+                                "y": {"type": "number", "description": "Top position as fraction of slide height, 0..1."},
+                                "w": {"type": "number", "description": "Box width as fraction of slide width, 0..1."},
+                                "h": {"type": "number", "description": "Box height as fraction of slide height, 0..1."},
+                            }, "required": ["path"]},
+                        },
                     }},
                 },
                 "theme": {

@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from supervisor.state import (
     acquire_file_lock,
+    append_jsonl,
     atomic_write_text,
     release_file_lock,
 )
@@ -30,6 +31,7 @@ ACCESS_APPROVED = "approved"
 ACCESS_PENDING = "pending"
 ACCESS_DENIED = "denied"
 ACCESS_STATUSES = {ACCESS_APPROVED, ACCESS_PENDING, ACCESS_DENIED}
+ACCESS_REQUESTS_LOG = "access_requests.jsonl"
 
 
 def init(drive_root: pathlib.Path) -> None:
@@ -289,6 +291,34 @@ def request_user_access(
         return dict(rec), created, should_notify_admins
     finally:
         release_file_lock(USERS_LOCK_PATH, lock_fd)
+
+
+def log_access_request_message(
+    drive_root: pathlib.Path,
+    user_id: int,
+    chat_id: int,
+    text: str,
+    *,
+    from_user: Optional[Dict[str, Any]] = None,
+    access_status: str = ACCESS_PENDING,
+) -> None:
+    """Audit an access-request message without adding it to chat history."""
+    init(drive_root)
+    from_user = from_user or {}
+    row: Dict[str, Any] = {
+        "ts": _now_iso(),
+        "type": "user_access_request_message",
+        "direction": "in",
+        "chat_id": int(chat_id),
+        "user_id": int(user_id),
+        "access_status": _normalize_access_status(access_status, default=ACCESS_PENDING),
+        "text": str(text or ""),
+    }
+    for key in ("username", "first_name", "last_name"):
+        value = str(from_user.get(key) or "").strip()
+        if value:
+            row[key] = value
+    append_jsonl(DRIVE_ROOT / "logs" / ACCESS_REQUESTS_LOG, row)
 
 
 def mark_access_request_notified(drive_root: pathlib.Path, user_id: int) -> None:

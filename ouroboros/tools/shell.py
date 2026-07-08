@@ -262,9 +262,11 @@ def _parse_claude_output(stdout: str, ctx: ToolContext) -> str:
                 "type": "llm_usage",
                 "provider": "claude_code_cli",
                 "usage": {"cost": float(payload["total_cost_usd"])},
+                "task_id": ctx.task_id if ctx.task_id else "",
                 "source": "claude_code_edit",
                 "ts": utc_now_iso(),
                 "category": "task",
+                **ctx.event_scope(),
             })
         return json.dumps(out, ensure_ascii=False, indent=2)
     except Exception:

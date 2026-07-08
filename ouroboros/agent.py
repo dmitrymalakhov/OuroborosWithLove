@@ -695,6 +695,7 @@ class OuroborosAgent:
             self._event_queue.put({
                 "type": "typing_start", "chat_id": self._current_chat_id,
                 "ts": utc_now_iso(),
+                **self._event_scope(),
             })
         except Exception:
             log.warning("Failed to emit typing start event", exc_info=True)
@@ -707,6 +708,7 @@ class OuroborosAgent:
             self._event_queue.put({
                 "type": "task_heartbeat", "task_id": task_id,
                 "phase": phase, "ts": utc_now_iso(),
+                **self._event_scope(),
             })
         except Exception:
             log.warning("Failed to emit task heartbeat event", exc_info=True)

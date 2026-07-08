@@ -300,6 +300,7 @@ save_state(_st_admin)
 from supervisor.users import (
     ACCESS_APPROVED, ACCESS_PENDING,
     init as users_init, ensure_user_workspace,
+    log_access_request_message,
     request_user_access, user_access_status,
 )
 users_init(DRIVE_ROOT)
@@ -751,7 +752,14 @@ while True:
             access_status = user_access_status(access_rec)
             if access_status != ACCESS_APPROVED:
                 request_text = text or caption or "[non-text access request]"
-                log_chat("in", chat_id, user_id, request_text, drive_root=DRIVE_ROOT)
+                log_access_request_message(
+                    DRIVE_ROOT,
+                    user_id,
+                    chat_id,
+                    request_text,
+                    from_user=from_user,
+                    access_status=access_status,
+                )
                 append_jsonl(DRIVE_ROOT / "logs" / "events.jsonl", {
                     "ts": now_iso,
                     "type": "user_access_request",
@@ -779,6 +787,7 @@ while True:
                     reply,
                     log_drive_root=DRIVE_ROOT,
                     log_user_id=user_id,
+                    suppress_log=True,
                 )
                 continue
 

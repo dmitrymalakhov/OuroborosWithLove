@@ -863,22 +863,24 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                      force_budget: bool = False, fmt: str = "",
                      is_progress: bool = False,
                      log_drive_root: Optional[pathlib.Path] = None,
-                     log_user_id: Optional[int] = None) -> None:
+                     log_user_id: Optional[int] = None,
+                     suppress_log: bool = False) -> None:
     st = load_state()
     owner_id = int(log_user_id if log_user_id is not None else (st.get("owner_id") or 0))
     public_budget = not _is_budget_admin(st, log_user_id if log_user_id is not None else owner_id)
     # Progress messages go to progress.jsonl instead of chat.jsonl
     # This keeps chat history clean for context building
-    if is_progress:
-        root = pathlib.Path(log_drive_root) if log_drive_root is not None else DRIVE_ROOT
-        append_jsonl(root / "logs" / "progress.jsonl", {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "direction": "out", "chat_id": chat_id, "user_id": owner_id,
-            "text": text if log_text is None else log_text,
-        })
-    else:
-        log_chat("out", chat_id, owner_id, text if log_text is None else log_text,
-                 drive_root=log_drive_root)
+    if not suppress_log:
+        if is_progress:
+            root = pathlib.Path(log_drive_root) if log_drive_root is not None else DRIVE_ROOT
+            append_jsonl(root / "logs" / "progress.jsonl", {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "direction": "out", "chat_id": chat_id, "user_id": owner_id,
+                "text": text if log_text is None else log_text,
+            })
+        else:
+            log_chat("out", chat_id, owner_id, text if log_text is None else log_text,
+                     drive_root=log_drive_root)
     budget = budget_line(force=force_budget, public=public_budget)
     _text = str(text or "")
     if not budget:

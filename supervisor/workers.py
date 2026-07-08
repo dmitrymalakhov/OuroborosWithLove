@@ -126,6 +126,87 @@ def get_running_task_ids() -> List[str]:
 _chat_agents: Dict[str, Any] = {}
 _chat_agents_lock = threading.Lock()
 
+_TASK_CHAT_EVENTS = {
+    "send_message",
+    "send_photo",
+    "send_document",
+    "send_poll",
+    "stop_poll",
+    "offer_improvement_request",
+    "schedule_task",
+    "cancel_task",
+    "review_request",
+    "restart_request",
+    "promote_to_stable",
+    "toggle_evolution",
+    "toggle_consciousness",
+    "typing_start",
+}
+
+
+def _as_int_or_none(value: Any) -> Optional[int]:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _scope_event_for_task(
+    event: Dict[str, Any],
+    task: Dict[str, Any],
+    *,
+    shared_drive_root: Union[str, pathlib.Path],
+) -> Dict[str, Any]:
+    """Fill missing multi-user scope on events returned by an agent task."""
+    scoped = dict(event)
+    task_chat_id = _as_int_or_none(task.get("chat_id"))
+    task_user_id = _as_int_or_none(task.get("user_id"))
+    task_role = str(task.get("user_role") or ("admin" if task_user_id is None else "user")).lower()
+    task_drive_root = str(task.get("drive_root") or DRIVE_ROOT)
+    event_type = str(scoped.get("type") or "").strip()
+    role = task_role
+
+    if not scoped.get("task_id") and task.get("id"):
+        scoped["task_id"] = task.get("id")
+
+    if task_role != "admin":
+        scoped["user_id"] = task_user_id
+        scoped["user_role"] = role
+        scoped["drive_root"] = task_drive_root
+        scoped["shared_drive_root"] = str(shared_drive_root)
+        scoped["chat_type"] = str(task.get("chat_type") or "private")
+        scoped["team_chat_id"] = task.get("team_chat_id")
+        scoped["team_slug"] = str(task.get("team_slug") or "")
+        scoped["is_team_workspace"] = bool(task.get("is_team_workspace"))
+    else:
+        if scoped.get("user_id") is None and task_user_id is not None:
+            scoped["user_id"] = task_user_id
+        if not scoped.get("user_role"):
+            scoped["user_role"] = role
+        if not scoped.get("drive_root"):
+            scoped["drive_root"] = task_drive_root
+        if not scoped.get("shared_drive_root"):
+            scoped["shared_drive_root"] = str(shared_drive_root)
+    if not scoped.get("chat_type"):
+        scoped["chat_type"] = str(task.get("chat_type") or "private")
+    if "team_chat_id" not in scoped:
+        scoped["team_chat_id"] = task.get("team_chat_id")
+    if "team_slug" not in scoped:
+        scoped["team_slug"] = str(task.get("team_slug") or "")
+    if "is_team_workspace" not in scoped:
+        scoped["is_team_workspace"] = bool(task.get("is_team_workspace"))
+
+    if task_chat_id is not None and event_type in _TASK_CHAT_EVENTS:
+        event_chat_id = _as_int_or_none(scoped.get("chat_id"))
+        if event_chat_id is None:
+            scoped["chat_id"] = task_chat_id
+        elif role != "admin" and event_chat_id != task_chat_id:
+            scoped["chat_id"] = task_chat_id
+
+    return scoped
+
 
 def _chat_agent_key(user_id: Optional[int], drive_root: pathlib.Path, user_role: str) -> str:
     return f"{str(user_role or 'user').lower()}:{user_id or 0}:{str(drive_root)}"
@@ -198,7 +279,7 @@ def handle_chat_direct(
             task["text"] = "(image attached)" if image_data else ""
         events = agent.handle_task(task)
         for e in events:
-            get_event_q().put(e)
+            get_event_q().put(_scope_event_for_task(e, task, shared_drive_root=DRIVE_ROOT))
     except Exception as e:
         import traceback
         err_msg = f"⚠️ Error: {type(e).__name__}: {e}"
@@ -345,7 +426,7 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
             agent = _agent_for_task(task)
             events = agent.handle_task(task)
             for e in events:
-                e2 = dict(e)
+                e2 = _scope_event_for_task(e, task, shared_drive_root=drive_root)
                 e2["worker_id"] = wid
                 out_q.put(e2)
         except Exception as _e:

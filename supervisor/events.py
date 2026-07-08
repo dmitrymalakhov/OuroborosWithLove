@@ -748,6 +748,9 @@ def _handle_owner_message_injected(evt: Dict[str, Any], ctx: Any) -> None:
             "ts": evt.get("ts", utc_now_iso()),
             "type": "owner_message_injected",
             "task_id": evt.get("task_id", ""),
+            "user_id": evt.get("user_id"),
+            "user_role": evt.get("user_role", ""),
+            "drive_root": evt.get("drive_root", ""),
             "text": evt.get("text", "")[:200],
         })
     except Exception:

@@ -263,6 +263,7 @@ def _emit_usage_event(review_result: dict, ctx: ToolContext) -> None:
             "cost": review_result["cost_estimate"],
         },
         "category": "review",
+        **ctx.event_scope(),
     }
 
     if ctx.event_queue is not None:

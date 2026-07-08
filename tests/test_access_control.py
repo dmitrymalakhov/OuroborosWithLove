@@ -248,6 +248,9 @@ def test_admin_user_list_is_numbered_and_keyboard_is_compact():
         _write_jsonl(drive_root / "users" / "123" / "archive" / "chat_20260601_000000.jsonl", [
             {"direction": "in", "user_id": 123, "text": "old request"},
         ])
+        _write_jsonl(drive_root / "logs" / "access_requests.jsonl", [
+            {"direction": "in", "user_id": 123, "text": "please approve"},
+        ])
         runtime = AccessRuntime(
             drive_root=drive_root,
             admin_chat_ids_fn=lambda: [1],
@@ -260,12 +263,70 @@ def test_admin_user_list_is_numbered_and_keyboard_is_compact():
         button_texts = [button["text"] for row in keyboard["inline_keyboard"] for button in row]
 
         assert "1. Alice Doe" in text
-        assert "@alice · запросов: 3" in text
+        assert "@alice · запросов: 4" in text
         assert "   доступ:" in text
         assert "requested=" not in text
         assert "T" not in text
         assert "⛔️ 1" in button_texts
         assert all(len(label) <= 16 for label in button_texts)
+
+
+def test_access_request_audit_does_not_pollute_chat_history():
+    from supervisor.users import log_access_request_message
+    from ouroboros.memory import Memory
+
+    with tempfile.TemporaryDirectory() as tmp:
+        drive_root = pathlib.Path(tmp)
+
+        log_access_request_message(
+            drive_root,
+            user_id=123,
+            chat_id=456,
+            text="please approve me",
+            from_user={"username": "alice"},
+        )
+
+        access_log = drive_root / "logs" / "access_requests.jsonl"
+        chat_log = drive_root / "logs" / "chat.jsonl"
+        assert access_log.exists()
+        assert "please approve me" in access_log.read_text(encoding="utf-8")
+        assert not chat_log.exists()
+        assert Memory(drive_root).chat_history() == "(chat history is empty)"
+
+
+def test_send_with_budget_can_suppress_chat_log():
+    import sys
+    import types
+
+    from supervisor.state import init as state_init, save_state
+    sys.modules.setdefault("requests", types.SimpleNamespace())
+    from supervisor.telegram import init as telegram_init, send_with_budget
+
+    class FakeTG:
+        def __init__(self):
+            self.sent = []
+
+        def send_message(self, chat_id, text, parse_mode=""):
+            self.sent.append((chat_id, text, parse_mode))
+            return True, "ok"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        drive_root = pathlib.Path(tmp)
+        fake_tg = FakeTG()
+        state_init(drive_root, 0.0)
+        save_state({"owner_id": 1, "owner_chat_id": 1})
+        telegram_init(drive_root, 0.0, 10, fake_tg)
+
+        send_with_budget(
+            456,
+            "access pending",
+            log_drive_root=drive_root,
+            log_user_id=123,
+            suppress_log=True,
+        )
+
+        assert fake_tg.sent and fake_tg.sent[0][0] == 456
+        assert not (drive_root / "logs" / "chat.jsonl").exists()
 
 
 def test_admin_recent_user_view_sorts_by_last_seen():

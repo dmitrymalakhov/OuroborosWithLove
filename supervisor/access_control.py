@@ -16,6 +16,7 @@ from supervisor.teams import (
 )
 from supervisor.unresolved_tasks import STATUS_IN_PROGRESS, STATUS_OPEN, report_counts
 from supervisor.users import (
+    ACCESS_REQUESTS_LOG,
     ACCESS_APPROVED,
     ACCESS_DENIED,
     ACCESS_PENDING,
@@ -134,6 +135,10 @@ def _chat_log_paths(root: pathlib.Path) -> List[pathlib.Path]:
     return paths
 
 
+def _access_request_log_paths(drive_root: pathlib.Path) -> List[pathlib.Path]:
+    return [drive_root / "logs" / ACCESS_REQUESTS_LOG]
+
+
 def _count_user_requests_in_log(path: pathlib.Path, user_ids: set[int]) -> Dict[int, int]:
     counts: Dict[int, int] = {}
     try:
@@ -182,6 +187,11 @@ def _user_request_counts(drive_root: pathlib.Path, records: List[Dict[str, Any]]
                 if key not in seen_paths:
                     paths.append(path)
                     seen_paths.add(key)
+    for path in _access_request_log_paths(drive_root):
+        key = str(path)
+        if key not in seen_paths:
+            paths.append(path)
+            seen_paths.add(key)
 
     for path in paths:
         for uid, count in _count_user_requests_in_log(path, user_ids).items():

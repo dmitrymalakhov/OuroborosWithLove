@@ -248,6 +248,24 @@ def cancel_task_by_id(task_id: str) -> bool:
 # Timeout enforcement
 # ---------------------------------------------------------------------------
 
+def _task_notification_target(task: Dict[str, Any], owner_chat_id: int) -> Tuple[int, Optional[int], pathlib.Path]:
+    """Return (chat_id, user_id, drive_root) for task-specific supervisor notices."""
+    role = str(task.get("user_role") or "").lower()
+    chat_id = int(task.get("chat_id") or 0)
+    if not chat_id or role == "admin":
+        chat_id = int(owner_chat_id or chat_id or 0)
+
+    raw_user_id = task.get("user_id")
+    try:
+        user_id = int(raw_user_id) if raw_user_id is not None and str(raw_user_id).strip() else None
+    except Exception:
+        user_id = None
+
+    root_raw = task.get("drive_root")
+    root = pathlib.Path(str(root_raw)).resolve() if root_raw else DRIVE_ROOT
+    return chat_id, user_id, root
+
+
 def enforce_task_timeouts() -> None:
     """Check all RUNNING tasks for timeouts and enforce them."""
     # Import here to avoid circular dependency during module load
@@ -280,11 +298,14 @@ def enforce_task_timeouts() -> None:
 
         if runtime_sec >= SOFT_TIMEOUT_SEC and not bool(meta.get("soft_sent")):
             meta["soft_sent"] = True
-            if owner_chat_id:
+            notify_chat_id, notify_user_id, notify_root = _task_notification_target(task, owner_chat_id)
+            if notify_chat_id:
                 send_with_budget(
-                    owner_chat_id,
+                    notify_chat_id,
                     f"⏱️ Task {task_id} running for {int(runtime_sec)}s. "
                     f"type={task_type}, heartbeat_lag={int(hb_lag_sec)}s. Continuing.",
+                    log_drive_root=notify_root,
+                    log_user_id=notify_user_id,
                 )
 
         if runtime_sec < HARD_TIMEOUT_SEC:
@@ -331,17 +352,28 @@ def enforce_task_timeouts() -> None:
             },
         )
 
-        if owner_chat_id:
+        notify_chat_id, notify_user_id, notify_root = _task_notification_target(task, owner_chat_id)
+        if notify_chat_id:
             if requeued:
-                send_with_budget(owner_chat_id, (
-                    f"🛑 Hard-timeout: task {task_id} killed after {int(runtime_sec)}s.\n"
-                    f"Worker {worker_id} restarted. Task queued for retry attempt={new_attempt}."
-                ))
+                send_with_budget(
+                    notify_chat_id,
+                    (
+                        f"🛑 Hard-timeout: task {task_id} killed after {int(runtime_sec)}s.\n"
+                        f"Worker {worker_id} restarted. Task queued for retry attempt={new_attempt}."
+                    ),
+                    log_drive_root=notify_root,
+                    log_user_id=notify_user_id,
+                )
             else:
-                send_with_budget(owner_chat_id, (
-                    f"🛑 Hard-timeout: task {task_id} killed after {int(runtime_sec)}s.\n"
-                    f"Worker {worker_id} restarted. Retry limit exhausted, task stopped."
-                ))
+                send_with_budget(
+                    notify_chat_id,
+                    (
+                        f"🛑 Hard-timeout: task {task_id} killed after {int(runtime_sec)}s.\n"
+                        f"Worker {worker_id} restarted. Retry limit exhausted, task stopped."
+                    ),
+                    log_drive_root=notify_root,
+                    log_user_id=notify_user_id,
+                )
 
         persist_queue_snapshot(reason="task_hard_timeout")
 

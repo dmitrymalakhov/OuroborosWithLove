@@ -441,6 +441,7 @@ def _emit_llm_usage(ctx: ToolContext | None, usage: Dict[str, Any], model: str) 
             "cost": float(usage.get("cost", 0.0) or 0.0),
             "task_id": ctx.task_id,
             "task_type": ctx.current_task_type or "task",
+            **ctx.event_scope(),
         })
     except Exception:
         pass

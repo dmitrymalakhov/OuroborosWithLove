@@ -83,6 +83,20 @@ class ToolContext:
     def drive_logs(self) -> pathlib.Path:
         return (self.drive_root / "logs").resolve()
 
+    def event_scope(self) -> Dict[str, Any]:
+        """Return the multi-user routing scope for events emitted by tools."""
+        return {
+            "chat_id": self.current_chat_id,
+            "chat_type": self.chat_type,
+            "user_id": self.current_user_id,
+            "user_role": self.user_role,
+            "drive_root": str(self.drive_root),
+            "shared_drive_root": str(self.shared_drive_root or self.drive_root),
+            "team_chat_id": self.team_chat_id,
+            "team_slug": self.team_slug,
+            "is_team_workspace": self.is_team_workspace,
+        }
+
 
 @dataclass
 class ToolEntry:

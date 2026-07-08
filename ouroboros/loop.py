@@ -504,6 +504,8 @@ def _drain_incoming_messages(
     task_id: str,
     event_queue: Optional[queue.Queue],
     _owner_msg_seen: set,
+    user_id: Optional[int] = None,
+    user_role: str = "",
 ) -> None:
     """
     Inject owner messages received during task execution.
@@ -533,6 +535,9 @@ def _drain_incoming_messages(
                         "type": "owner_message_injected",
                         "task_id": task_id,
                         "text": dmsg[:200],
+                        "user_id": user_id,
+                        "user_role": user_role,
+                        "drive_root": str(drive_root) if drive_root is not None else "",
                     })
                 except Exception:
                     pass
@@ -680,7 +685,10 @@ def run_llm_loop(
                 ctx.active_effort_override = None
 
             # Inject owner messages (in-process queue + Drive mailbox)
-            _drain_incoming_messages(messages, incoming_messages, drive_root, task_id, event_queue, _owner_msg_seen)
+            _drain_incoming_messages(
+                messages, incoming_messages, drive_root, task_id, event_queue,
+                _owner_msg_seen, user_id=user_id, user_role=user_role
+            )
 
             # Compact old tool history when needed
             # Check for LLM-requested compaction first (via compact_context tool)

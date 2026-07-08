@@ -346,6 +346,7 @@ Now write a comprehensive summary:"""
                     "cost": usage.get("cost", 0),
                 },
                 "category": "summarize",
+                **ctx.event_scope(),
             }
             if ctx.event_queue is not None:
                 try:

@@ -12,6 +12,7 @@ import sys
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -105,7 +106,7 @@ class TestDirectChatImageRouting(unittest.TestCase):
     """Test image task payload routing for Telegram photo edits."""
 
     def test_handle_chat_direct_preserves_image_note_and_image_context(self):
-        with unittest.mock.patch.dict(sys.modules, {"requests": unittest.mock.MagicMock()}):
+        with mock.patch.dict(sys.modules, {"requests": mock.MagicMock()}):
             workers = importlib.import_module("supervisor.workers")
 
         class FakeAgent:
@@ -117,7 +118,7 @@ class TestDirectChatImageRouting(unittest.TestCase):
                 return []
 
         fake_agent = FakeAgent()
-        fake_queue = unittest.mock.MagicMock()
+        fake_queue = mock.MagicMock()
         text = (
             "\n\n[Telegram image saved]\n"
             "- path: uploads/2026-06-03/42_telegram_photo_42.jpg\n"
@@ -127,8 +128,8 @@ class TestDirectChatImageRouting(unittest.TestCase):
             "Use edit_image(path='<path>', prompt='<requested edit>') when the user asks to modify this image."
         )
 
-        with unittest.mock.patch.object(workers, "_get_chat_agent", return_value=fake_agent), \
-                unittest.mock.patch.object(workers, "get_event_q", return_value=fake_queue):
+        with mock.patch.object(workers, "_get_chat_agent", return_value=fake_agent), \
+                mock.patch.object(workers, "get_event_q", return_value=fake_queue):
             workers.handle_chat_direct(
                 123,
                 text,
@@ -143,6 +144,105 @@ class TestDirectChatImageRouting(unittest.TestCase):
         self.assertEqual(fake_agent.task["image_base64"], "base64-image")
         self.assertEqual(fake_agent.task["image_mime"], "image/jpeg")
         self.assertEqual(fake_agent.task["image_caption"], "убери фон")
+
+    def test_handle_chat_direct_scopes_returned_events_to_task_user(self):
+        with mock.patch.dict(sys.modules, {"requests": mock.MagicMock()}):
+            workers = importlib.import_module("supervisor.workers")
+
+        class FakeAgent:
+            def handle_task(self, task):
+                return [
+                    {
+                        "type": "send_message",
+                        "chat_id": 999,
+                        "user_id": 1,
+                        "user_role": "admin",
+                        "drive_root": "/tmp/admin-root",
+                        "text": "wrong chat",
+                    },
+                    {"type": "llm_usage", "usage": {"cost": 0.1}},
+                ]
+
+        class FakeQueue:
+            def __init__(self):
+                self.events = []
+
+            def put(self, event):
+                self.events.append(event)
+
+        fake_queue = FakeQueue()
+        drive_root = pathlib.Path("/tmp/ouroboros-user-456")
+
+        with mock.patch.object(workers, "_get_chat_agent", return_value=FakeAgent()), \
+                mock.patch.object(workers, "get_event_q", return_value=fake_queue):
+            workers.handle_chat_direct(
+                123,
+                "hello",
+                user_id=456,
+                user_role="user",
+                drive_root=drive_root,
+            )
+
+        self.assertEqual(len(fake_queue.events), 2)
+        message_event = fake_queue.events[0]
+        usage_event = fake_queue.events[1]
+        self.assertEqual(message_event["chat_id"], 123)
+        self.assertEqual(message_event["user_id"], 456)
+        self.assertEqual(message_event["user_role"], "user")
+        self.assertEqual(message_event["drive_root"], str(drive_root))
+        self.assertEqual(usage_event["user_id"], 456)
+        self.assertEqual(usage_event["user_role"], "user")
+        self.assertEqual(usage_event["drive_root"], str(drive_root))
+
+
+class TestQueueTimeoutRouting(unittest.TestCase):
+    """Test task-specific supervisor notices do not leak to owner chat."""
+
+    def test_soft_timeout_for_user_task_goes_to_task_chat(self):
+        with mock.patch.dict(sys.modules, {"requests": mock.MagicMock()}):
+            from supervisor import queue
+
+            sent = []
+            old_running = dict(queue.RUNNING)
+            old_soft = queue.SOFT_TIMEOUT_SEC
+            old_hard = queue.HARD_TIMEOUT_SEC
+            old_drive = queue.DRIVE_ROOT
+            drive_root = pathlib.Path("/tmp/ouroboros-timeout-test")
+            try:
+                queue.RUNNING.clear()
+                queue.RUNNING["task1"] = {
+                    "task": {
+                        "id": "task1",
+                        "type": "task",
+                        "chat_id": 222,
+                        "user_id": 333,
+                        "user_role": "user",
+                        "drive_root": str(drive_root / "users" / "333"),
+                    },
+                    "started_at": 100.0,
+                    "last_heartbeat_at": 100.0,
+                    "soft_sent": False,
+                }
+                queue.SOFT_TIMEOUT_SEC = 10
+                queue.HARD_TIMEOUT_SEC = 1000
+                queue.DRIVE_ROOT = drive_root
+
+                with mock.patch.object(queue, "load_state", return_value={"owner_chat_id": 111}), \
+                        mock.patch.object(queue.time, "time", return_value=120.0), \
+                        mock.patch.object(queue, "send_with_budget", side_effect=lambda *args, **kwargs: sent.append((args, kwargs))):
+                    queue.enforce_task_timeouts()
+            finally:
+                queue.RUNNING.clear()
+                queue.RUNNING.update(old_running)
+                queue.SOFT_TIMEOUT_SEC = old_soft
+                queue.HARD_TIMEOUT_SEC = old_hard
+                queue.DRIVE_ROOT = old_drive
+
+        self.assertEqual(len(sent), 1)
+        args, kwargs = sent[0]
+        self.assertEqual(args[0], 222)
+        self.assertEqual(kwargs["log_user_id"], 333)
+        self.assertEqual(kwargs["log_drive_root"], (drive_root / "users" / "333").resolve())
 
 
 if __name__ == "__main__":

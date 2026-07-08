@@ -137,6 +137,19 @@ def _fraction_emu(value: Any, total: int, default: int) -> int:
 
 
 def _auto_image_box(idx: int, total: int) -> tuple[int, int, int, int]:
+    if total == 1:
+        return 6_900_000, 1_520_000, 4_520_000, 3_480_000
+    if total == 2:
+        return 6_900_000, 1_420_000 + idx * 2_120_000, 4_520_000, 1_820_000
+    if 3 <= total <= 4:
+        cols = 2
+        gap = 140_000
+        area_x, area_y = 6_780_000, 1_470_000
+        cell_cx, cell_cy = 2_180_000, 1_680_000
+        col = idx % cols
+        row = idx // cols
+        return area_x + col * (cell_cx + gap), area_y + row * (cell_cy + gap), cell_cx, cell_cy
+
     cols = min(max(total, 1), 4)
     rows = (max(total, 1) + cols - 1) // cols
     area_x, area_y = 900_000, 5_220_000

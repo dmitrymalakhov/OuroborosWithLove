@@ -180,8 +180,10 @@ def test_create_presentation_embeds_slide_images(tmp_path):
     assert "<p:pic>" in slide_xml
     assert 'r:embed="rId2"' in slide_xml
     assert "Логотип ДЕКАРТ" in slide_xml
+    assert 'name="Image frame"' in slide_xml
+    assert 'prst="roundRect"' in slide_xml
     content_block = slide_xml.split('name="Content"', 1)[1].split("</p:sp>", 1)[0]
-    assert 'cx="7870160"' in content_block
+    assert 'cx="5450000"' in content_block
     assert 'Target="../media/image1.png"' in rels_xml
     assert 'Extension="png" ContentType="image/png"' in content_types
 
@@ -211,6 +213,24 @@ def test_presentation_image_box_clamps_inside_slide():
 
     assert f'x="{expected_x}" y="{expected_y}"' in xml
     assert f'cx="{expected_w}" cy="{expected_h}"' in xml
+
+
+def test_presentation_auto_image_box_uses_visual_stage():
+    xml = picture(
+        2,
+        {
+            "path": "dekart_assets/product.png",
+            "name": "product.png",
+            "rel_id": "rId2",
+            "width_px": 720,
+            "height_px": 360,
+        },
+        0,
+        1,
+    )
+
+    assert 'x="6900000" y="2130000"' in xml
+    assert 'cx="4520000" cy="2260000"' in xml
 
 
 def test_convert_pptx_to_pdf_writes_pdf_and_queues_delivery(tmp_path, monkeypatch):

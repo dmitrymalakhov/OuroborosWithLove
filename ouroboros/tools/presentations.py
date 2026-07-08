@@ -12,14 +12,24 @@ import pathlib
 import re
 import zipfile
 from typing import Any, Dict, List
-from xml.sax.saxutils import escape
 
 from ouroboros.tools.presentation_images import (
+    SLIDE_H,
+    SLIDE_W,
     coerce_images,
     image_bounds,
     image_content_type_defaults,
     picture,
     prepare_slide_images,
+)
+from ouroboros.tools.presentation_visuals import (
+    THEMES,
+    boxes_overlap,
+    image_frame,
+    rect as _rect,
+    textbox as _textbox,
+    title_size as _title_size,
+    xml_text as _x,
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import safe_relpath
@@ -29,44 +39,6 @@ PPTX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.p
 MAX_SLIDES = 60
 MAX_BULLETS = 12
 MAX_TEXT_CHARS = 1600
-SLIDE_W = 12_192_000
-SLIDE_H = 6_858_000
-EMU_PER_POINT = 12_700
-MIN_TEXT_SIZE = 1_150
-
-
-THEMES: Dict[str, Dict[str, str]] = {
-    "professional": {
-        "bg": "FFFFFF",
-        "text": "172033",
-        "muted": "64748B",
-        "accent": "0F766E",
-        "accent2": "EAB308",
-        "panel": "F8FAFC",
-        "line": "CBD5E1",
-        "inverse": "FFFFFF",
-    },
-    "dark": {
-        "bg": "111827",
-        "text": "F8FAFC",
-        "muted": "CBD5E1",
-        "accent": "38BDF8",
-        "accent2": "F59E0B",
-        "panel": "1F2937",
-        "line": "475569",
-        "inverse": "0F172A",
-    },
-    "clean": {
-        "bg": "F7F7F2",
-        "text": "1F2933",
-        "muted": "56616F",
-        "accent": "B45309",
-        "accent2": "2563EB",
-        "panel": "FFFFFF",
-        "line": "D7D7CB",
-        "inverse": "FFFFFF",
-    },
-}
 
 
 def _scope(ctx: ToolContext) -> dict:
@@ -149,7 +121,7 @@ def _coerce_slides(slides: Any) -> List[Dict[str, Any]]:
         if not isinstance(raw, dict):
             raw = {"title": str(raw)}
         layout = _clean_text(raw.get("layout") or "auto", 40).lower()
-        if layout not in {"auto", "title", "section", "bullets", "two_column", "quote", "closing"}:
+        if layout not in {"auto", "title", "section", "bullets", "two_column", "quote", "visual", "closing"}:
             layout = "auto"
         slide = {
             "layout": layout,
@@ -173,6 +145,8 @@ def _coerce_slides(slides: Any) -> List[Dict[str, Any]]:
                 slide["layout"] = "quote"
             elif "thank" in slide["title"].lower() or "next step" in slide["title"].lower():
                 slide["layout"] = "closing"
+            elif slide["images"]:
+                slide["layout"] = "visual"
             else:
                 slide["layout"] = "bullets"
         result.append(slide)
@@ -222,196 +196,6 @@ def _presentation_slides(
     return result[:MAX_SLIDES]
 
 
-def _x(text: Any) -> str:
-    return escape(str(text or ""), {"\"": "&quot;"})
-
-
-def _paragraph(text: str, size: int, color: str, bold: bool = False, bullet: bool = False, align: str = "l") -> str:
-    bold_attr = ' b="1"' if bold else ""
-    ppr = f'<a:pPr algn="{align}"/>'
-    if bullet:
-        ppr = '<a:pPr marL="342900" indent="-171450"><a:buChar char="&#8226;"/></a:pPr>'
-    return (
-        "<a:p>"
-        f"{ppr}"
-        "<a:r>"
-        f'<a:rPr lang="en-US" sz="{size}"{bold_attr}>'
-        f'<a:solidFill><a:srgbClr val="{color}"/></a:solidFill>'
-        "</a:rPr>"
-        f"<a:t>{_x(text)}</a:t>"
-        "</a:r>"
-        f'<a:endParaRPr lang="en-US" sz="{size}"/>'
-        "</a:p>"
-    )
-
-
-def _estimate_wrapped_lines(text: str, size: int, cx: int, bullet: bool = False) -> int:
-    size_pt = max(8.0, size / 100)
-    width_pt = max(20.0, cx / EMU_PER_POINT)
-    chars_per_line = max(8, int(width_pt / (size_pt * 0.54)))
-    if bullet:
-        chars_per_line = max(8, chars_per_line - 3)
-
-    lines = 0
-    for part in str(text or "").splitlines() or [""]:
-        length = max(1, len(part.strip()))
-        lines += max(1, (length + chars_per_line - 1) // chars_per_line)
-    return lines
-
-
-def _estimated_text_height_pt(items: List[Dict[str, Any]], cx: int) -> float:
-    height = 0.0
-    for item in items:
-        size = int(item.get("size", 2200))
-        size_pt = size / 100
-        lines = _estimate_wrapped_lines(item.get("text", ""), size, cx, bool(item.get("bullet", False)))
-        height += lines * size_pt * 1.16
-        height += max(1.5, size_pt * 0.12)
-    return height
-
-
-def _fit_textbox_items(
-    paragraphs: List[Dict[str, Any]],
-    cx: int,
-    cy: int,
-    margin: int,
-    min_size: int = MIN_TEXT_SIZE,
-) -> List[Dict[str, Any]]:
-    items = [dict(item) for item in paragraphs if _clean_text(item.get("text"))]
-    if not items:
-        return []
-
-    usable_cx = max(1, cx - 2 * margin)
-    usable_cy = max(1, cy - 2 * margin)
-    available_pt = max(10.0, usable_cy / EMU_PER_POINT)
-
-    for _ in range(16):
-        if _estimated_text_height_pt(items, usable_cx) <= available_pt:
-            return items
-        changed = False
-        for item in items:
-            size = int(item.get("size", 2200))
-            if size > min_size:
-                item["size"] = max(min_size, int(size * 0.92))
-                changed = True
-        if not changed:
-            break
-
-    fitted: List[Dict[str, Any]] = []
-    omitted = 0
-    for item in items:
-        candidate = fitted + [item]
-        if _estimated_text_height_pt(candidate, usable_cx) <= available_pt:
-            fitted.append(item)
-        else:
-            omitted += 1
-
-    if omitted and fitted:
-        marker = {
-            "text": "...",
-            "size": min_size,
-            "color": fitted[-1].get("color", "000000"),
-            "bullet": bool(fitted[-1].get("bullet", False)),
-        }
-        while fitted and _estimated_text_height_pt(fitted + [marker], usable_cx) > available_pt:
-            fitted.pop()
-        if fitted:
-            fitted.append(marker)
-        else:
-            first = dict(items[0])
-            first["size"] = min(int(first.get("size", min_size)), min_size)
-            if _estimated_text_height_pt([first, marker], usable_cx) <= available_pt:
-                fitted = [first, marker]
-            else:
-                fitted = [marker]
-
-    return fitted or items[:1]
-
-
-def _textbox(
-    shape_id: int,
-    name: str,
-    x: int,
-    y: int,
-    cx: int,
-    cy: int,
-    paragraphs: List[Dict[str, Any]],
-    fill: str = "",
-    line: str = "",
-    margin: int = 80_000,
-    min_size: int = MIN_TEXT_SIZE,
-) -> str:
-    fill_xml = f'<a:solidFill><a:srgbClr val="{fill}"/></a:solidFill>' if fill else "<a:noFill/>"
-    line_xml = f'<a:ln><a:solidFill><a:srgbClr val="{line}"/></a:solidFill></a:ln>' if line else "<a:ln><a:noFill/></a:ln>"
-    fitted_paragraphs = _fit_textbox_items(paragraphs, cx, cy, margin, min_size)
-    para_xml = "".join(
-        _paragraph(
-            item.get("text", ""),
-            int(item.get("size", 2200)),
-            item.get("color", "000000"),
-            bool(item.get("bold", False)),
-            bool(item.get("bullet", False)),
-            item.get("align", "l"),
-        )
-        for item in fitted_paragraphs
-    )
-    if not para_xml:
-        para_xml = "<a:p/>"
-    return (
-        "<p:sp>"
-        "<p:nvSpPr>"
-        f'<p:cNvPr id="{shape_id}" name="{_x(name)}"/>'
-        '<p:cNvSpPr txBox="1"/>'
-        "<p:nvPr/>"
-        "</p:nvSpPr>"
-        "<p:spPr>"
-        f'<a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
-        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
-        f"{fill_xml}{line_xml}"
-        "</p:spPr>"
-        "<p:txBody>"
-        f'<a:bodyPr wrap="square" lIns="{margin}" tIns="{margin}" rIns="{margin}" bIns="{margin}">'
-        '<a:normAutofit fontScale="65000" lnSpcReduction="20000"/></a:bodyPr>'
-        "<a:lstStyle/>"
-        f"{para_xml}"
-        "</p:txBody>"
-        "</p:sp>"
-    )
-
-
-def _rect(shape_id: int, name: str, x: int, y: int, cx: int, cy: int, fill: str) -> str:
-    return (
-        "<p:sp>"
-        "<p:nvSpPr>"
-        f'<p:cNvPr id="{shape_id}" name="{_x(name)}"/>'
-        "<p:cNvSpPr/>"
-        "<p:nvPr/>"
-        "</p:nvSpPr>"
-        "<p:spPr>"
-        f'<a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
-        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
-        f'<a:solidFill><a:srgbClr val="{fill}"/></a:solidFill>'
-        "<a:ln><a:noFill/></a:ln>"
-        "</p:spPr>"
-        "</p:sp>"
-    )
-
-
-def _title_size(text: str) -> int:
-    length = len(text or "")
-    if length > 80:
-        return 3000
-    if length > 48:
-        return 3600
-    return 4400
-
-
-def _boxes_overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
-    ax, ay, acx, acy = a
-    bx, by, bcx, bcy = b
-    return ax < bx + bcx and ax + acx > bx and ay < by + bcy and ay + acy > by
-
-
 def _trim_box_for_right_images(
     slide: Dict[str, Any],
     x: int,
@@ -425,7 +209,7 @@ def _trim_box_for_right_images(
     own_box = (x, y, cx, cy)
     for idx, image in enumerate(images):
         ix, iy, icx, icy = image_bounds(image, idx, len(images))
-        if ix > SLIDE_W * 0.45 and _boxes_overlap(own_box, (ix, iy, icx, icy)):
+        if ix > SLIDE_W * 0.45 and boxes_overlap(own_box, (ix, iy, icx, icy)):
             right = min(right, ix - 180_000)
     if right - x >= min_cx:
         return x, y, right - x, cy
@@ -446,7 +230,7 @@ def _fit_content_box_around_images(
     for idx, image in enumerate(images):
         ix, iy, icx, icy = image_bounds(image, idx, len(images))
         image_box = (ix, iy, icx, icy)
-        if not _boxes_overlap(own_box, image_box):
+        if not boxes_overlap(own_box, image_box):
             continue
         if iy + icy / 2 > y + cy * 0.7:
             bottom = min(bottom, iy - 180_000)
@@ -467,27 +251,30 @@ def _render_slide_shapes(slide: Dict[str, Any], theme: Dict[str, str], slide_no:
     sid = 2
     layout = slide["layout"]
     title = slide["title"] or ("Slide " + str(slide_no))
+    images = slide.get("_prepared_images") or []
 
     shapes.append(_rect(sid, "Top accent", 0, 0, SLIDE_W, 90_000, theme["accent"]))
     sid += 1
 
     if layout == "title":
-        shapes.append(_rect(sid, "Accent block", 0, 0, 430_000, SLIDE_H, theme["accent"]))
+        shapes.append(_rect(sid, "Accent block", 0, 0, 520_000, SLIDE_H, theme["accent"]))
+        sid += 1
+        shapes.append(_rect(sid, "Title wash", 8_700_000, 90_000, 3_492_000, SLIDE_H - 90_000, theme["panel"]))
         sid += 1
         shapes.append(_textbox(
-            sid, "Title", 900_000, 1_900_000, 10_500_000, 1_250_000,
+            sid, "Title", 900_000, 1_740_000, 7_900_000, 1_420_000,
             [{"text": title, "size": _title_size(title), "color": theme["text"], "bold": True}],
             margin=0,
         ))
         sid += 1
         if slide["subtitle"]:
             shapes.append(_textbox(
-                sid, "Subtitle", 900_000, 3_160_000, 9_800_000, 760_000,
+                sid, "Subtitle", 900_000, 3_170_000, 7_150_000, 760_000,
                 [{"text": slide["subtitle"], "size": 2400, "color": theme["muted"]}],
                 margin=0,
             ))
             sid += 1
-        shapes.append(_rect(sid, "Divider", 900_000, 4_080_000, 2_200_000, 65_000, theme["accent2"]))
+        shapes.append(_rect(sid, "Divider", 900_000, 4_130_000, 2_760_000, 75_000, theme["accent2"]))
         sid += 1
         return "".join(shapes)
 
@@ -508,6 +295,13 @@ def _render_slide_shapes(slide: Dict[str, Any], theme: Dict[str, str], slide_no:
             ))
         return "".join(shapes)
 
+    for idx, image in enumerate(images):
+        ix, iy, icx, icy = image_bounds(image, idx, len(images))
+        shapes.append(image_frame(sid, "Image frame", ix, iy, icx, icy, theme))
+        sid += 1
+    shapes.append(_rect(sid, "Bottom accent", 0, SLIDE_H - 135_000, 2_720_000, 135_000, theme["accent2"]))
+    sid += 1
+
     title_x, title_y, title_cx, title_cy = _trim_box_for_right_images(
         slide, 650_000, 420_000, 10_950_000, 720_000, 5_200_000
     )
@@ -525,6 +319,8 @@ def _render_slide_shapes(slide: Dict[str, Any], theme: Dict[str, str], slide_no:
              + [{"text": item, "size": 1850, "color": theme["text"], "bullet": True} for item in slide["left_bullets"]]),
             fill=theme["panel"],
             line=theme["line"],
+            margin=120_000,
+            geometry="roundRect",
         ))
         sid += 1
         shapes.append(_textbox(
@@ -533,6 +329,8 @@ def _render_slide_shapes(slide: Dict[str, Any], theme: Dict[str, str], slide_no:
              + [{"text": item, "size": 1850, "color": theme["text"], "bullet": True} for item in slide["right_bullets"]]),
             fill=theme["panel"],
             line=theme["line"],
+            margin=120_000,
+            geometry="roundRect",
         ))
         sid += 1
     elif layout == "quote":
@@ -552,6 +350,30 @@ def _render_slide_shapes(slide: Dict[str, Any], theme: Dict[str, str], slide_no:
                 margin=0,
             ))
             sid += 1
+    elif layout == "visual":
+        body_items: List[Dict[str, Any]] = []
+        if slide["subtitle"]:
+            body_items.append({"text": slide["subtitle"], "size": 1700, "color": theme["accent"], "bold": True})
+        if slide["body"]:
+            body_items.append({"text": slide["body"], "size": 2100, "color": theme["muted"]})
+        for bullet in slide["bullets"]:
+            body_items.append({"text": bullet, "size": 1900, "color": theme["text"], "bullet": True})
+        if not body_items:
+            body_items.append({"text": "Key visual", "size": 2100, "color": theme["muted"]})
+        shapes.append(_rect(sid, "Visual rule", 760_000, 1_560_000, 95_000, 3_700_000, theme["accent2"]))
+        sid += 1
+        content_x, content_y, content_cx, content_cy = _fit_content_box_around_images(
+            slide, 1_000_000, 1_500_000, 5_450_000, 4_250_000
+        )
+        shapes.append(_textbox(
+            sid, "Content", content_x, content_y, content_cx, content_cy,
+            body_items,
+            fill=theme["panel"],
+            line=theme["line"],
+            margin=155_000,
+            geometry="roundRect",
+        ))
+        sid += 1
     else:
         body_items: List[Dict[str, Any]] = []
         if slide["body"]:
@@ -568,6 +390,7 @@ def _render_slide_shapes(slide: Dict[str, Any], theme: Dict[str, str], slide_no:
             body_items,
             fill=theme["panel"] if layout == "closing" else "",
             line=theme["line"] if layout == "closing" else "",
+            geometry="roundRect" if layout == "closing" else "rect",
         ))
         sid += 1
 
@@ -579,7 +402,6 @@ def _render_slide_shapes(slide: Dict[str, Any], theme: Dict[str, str], slide_no:
     ))
     sid += 1
 
-    images = slide.get("_prepared_images") or []
     for idx, image in enumerate(images):
         shapes.append(picture(sid, image, idx, len(images)))
         sid += 1
@@ -919,7 +741,7 @@ def get_tools() -> List[ToolEntry]:
                     "items": {"type": "object", "properties": {
                         "layout": {
                             "type": "string",
-                            "enum": ["auto", "section", "bullets", "two_column", "quote", "closing"],
+                            "enum": ["auto", "section", "bullets", "two_column", "quote", "visual", "closing"],
                             "default": "auto",
                         },
                         "title": {"type": "string"},
@@ -954,7 +776,7 @@ def get_tools() -> List[ToolEntry]:
                 },
                 "theme": {
                     "type": "string",
-                    "enum": ["professional", "dark", "clean"],
+                    "enum": ["professional", "dark", "clean", "vivid"],
                     "default": "professional",
                     "description": "Visual theme.",
                 },
